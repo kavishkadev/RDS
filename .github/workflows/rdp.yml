@@ -251,26 +251,41 @@ jobs:
         run: |
           echo "Obtaining OAuth token..."
           
+          # Read secrets into variables (handle Windows line endings)
           CLIENT_ID="${{ secrets.TS_CLIENT_ID }}"
           CLIENT_SECRET="${{ secrets.TS_CLIENT_SECRET }}"
           
+          # Check if secrets are set
           if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
-            echo "Warning: TS_CLIENT_ID or TS_CLIENT_SECRET not set. Skipping auto-approve."
+            echo "::warning::TS_CLIENT_ID or TS_CLIENT_SECRET not set. Skipping auto-approve."
             echo "oauth_token=" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          # Get OAuth token using curl
-          TOKEN=$(curl -s -X POST "https://login.tailscale.com/api/v2/oauth/token" \
+          # Get OAuth token using curl (with proper error handling)
+          RESPONSE=$(curl -s -X POST "https://login.tailscale.com/api/v2/oauth/token" \
             -u "$CLIENT_ID:$CLIENT_SECRET" \
-            -d "grant_type=client_credentials&scope=device" | \
-            grep -o '"access_token":"[^"]*' | cut -d'"' -f4)
+            -d "grant_type=client_credentials&scope=device" \
+            -w "\n%{http_code}")
           
-          if [ -n "$TOKEN" ]; then
-            echo "oauth_token=$TOKEN" >> $GITHUB_OUTPUT
-            echo "OAuth token obtained successfully!"
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            # Extract token from JSON response
+            TOKEN=$(echo "$BODY" | grep -o '"access_token":"[^"]*' | cut -d'"' -f4)
+            
+            if [ -n "$TOKEN" ]; then
+              echo "oauth_token=$TOKEN" >> $GITHUB_OUTPUT
+              echo "✅ OAuth token obtained successfully!"
+              echo "Token length: ${#TOKEN} characters"
+            else
+              echo "::warning::Failed to parse access token from response"
+              echo "oauth_token=" >> $GITHUB_OUTPUT
+            fi
           else
-            echo "Warning: Failed to obtain OAuth token"
+            echo "::warning::OAuth request failed with HTTP $HTTP_CODE"
+            echo "Response: $BODY"
             echo "oauth_token=" >> $GITHUB_OUTPUT
           fi
       # ─────────────────────────────────────────
