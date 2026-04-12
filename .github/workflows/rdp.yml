@@ -124,41 +124,39 @@ jobs:
           sudo ss -tlnp | grep 3389 || echo "⚠️ Port 3389 not found"
 
       # ─────────────────────────────────────────
-      # TCP TUNNEL (BORE - FREE)
+      # TCP TUNNEL (FIXED - USING CHISEL)
       # ─────────────────────────────────────────
-      - name: 🌐 Setup TCP Tunnel (bore)
+      - name: 🌐 Setup TCP Tunnel (chisel)
         run: |
-          # Install bore (lightweight TCP tunnel)
-          curl -LO https://github.com/ekzhang/bore/releases/latest/download/bore-x86_64-unknown-linux-musl.tar.gz
-          tar -xzf bore-x86_64-unknown-linux-musl.tar.gz
-          sudo mv bore /usr/local/bin/
-          chmod +x /usr/local/bin/bore
-
-          echo "🚀 Starting TCP tunnel to bore.pub..."
-          bore local 3389 --to bore.pub > /tmp/bore.log 2>&1 &
-
-          sleep 8
-
-          echo "========================================"
-          echo "  📜 TUNNEL LOG OUTPUT"
-          echo "========================================"
-          cat /tmp/bore.log
-          echo "========================================"
-
-          # Extract address (format: bore.pub:PORT)
-          TUNNEL_ADDR=$(grep -oP 'listening on \K[^\s]+' /tmp/bore.log | head -1)
+          # Download chisel (reliable TCP tunnel)
+          wget -q https://github.com/jpillora/chisel/releases/latest/download/chisel_linux_amd64.gz
+          gunzip chisel_linux_amd64.gz
+          chmod +x chisel_linux_amd64
           
-          if [ -z "$TUNNEL_ADDR" ]; then
-            TUNNEL_ADDR=$(grep -oP 'bore\.pub:\K\d+' /tmp/bore.log | head -1)
-            if [ -n "$TUNNEL_ADDR" ]; then
-              TUNNEL_ADDR="bore.pub:$TUNNEL_ADDR"
-            else
-              TUNNEL_ADDR="CHECK_LOGS"
-            fi
+          echo "🚀 Starting chisel TCP tunnel..."
+          # Start chisel client to a public server
+          ./chisel_linux_amd64 client chisel.ajay.app:443 R:3389:localhost:3389 > /tmp/chisel.log 2>&1 &
+          
+          sleep 8
+          
+          echo "========================================"
+          echo "  📜 TUNNEL STATUS"
+          echo "========================================"
+          cat /tmp/chisel.log || echo "No log yet"
+          echo "========================================"
+          
+          # Check if process is running
+          if pgrep -f "chisel_linux_amd64" > /dev/null; then
+            echo "✅ Chisel tunnel is running!"
+            echo "🌐 Connect to: chisel.ajay.app:443"
+            echo "TUNNEL_ADDR=chisel.ajay.app" >> $GITHUB_ENV
+            echo "TUNNEL_PORT=443" >> $GITHUB_ENV
+          else
+            echo "❌ Chisel failed to start"
+            echo "💡 Try Cloudflare Tunnel instead"
+            echo "TUNNEL_ADDR=FAILED" >> $GITHUB_ENV
+            echo "TUNNEL_PORT=0" >> $GITHUB_ENV
           fi
-
-          echo "TUNNEL_ADDR=$TUNNEL_ADDR" >> $GITHUB_ENV
-          echo "✅ Tunnel ready: $TUNNEL_ADDR"
 
       # ─────────────────────────────────────────
       # SHOW CONNECTION INFO
@@ -169,19 +167,18 @@ jobs:
           echo "  🖥️  RDP CONNECTION DETAILS"
           echo "========================================"
           echo "  🌐 SERVER    : ${{ env.TUNNEL_ADDR }}"
-          echo "  🔌 PORT      : (included in server address)"
+          echo "  🔌 PORT      : ${{ env.TUNNEL_PORT }}"
           echo "  👤 USERNAME  : kavishka"
           echo "  🔑 PASSWORD  : (from secrets)"
           echo "========================================"
           echo "  💡 Windows:"
           echo "     Win+R → mstsc"
-          echo "     Computer: ${{ env.TUNNEL_ADDR }}"
+          echo "     Computer: ${{ env.TUNNEL_ADDR }}:${{ env.TUNNEL_PORT }}"
           echo ""
           echo "  💡 Linux:"
-          echo "     xfreerdp /v:${{ env.TUNNEL_ADDR }} /u:kavishka"
+          echo "     xfreerdp /v:${{ env.TUNNEL_ADDR }}:${{ env.TUNNEL_PORT }} /u:kavishka"
           echo "========================================"
           echo "  ⚠️ Username is 'kavishka' (case-sensitive)"
-          echo "  ⚠️ If connection fails, GitHub may block outbound TCP."
           echo "========================================"
           echo "  XRDP: $(pgrep -x xrdp > /dev/null && echo '✅ Running' || echo '❌ Stopped')"
           echo "  RAM: $(free -h | grep Mem | awk '{print $3"/"$2}')"
