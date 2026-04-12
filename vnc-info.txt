@@ -1,0 +1,7 @@
+MACOS_IP=pending-check-tailscale-dashboard
+USERNAME=runner
+VNC_PORT=5900
+SSH_PORT=22
+SSH_CMD=ssh runner@pending-check-tailscale-dashboard
+STARTED=2026-04-12 19:25:12 UTC
+EXPIRES=2026-04-13 00:25:12 UTC
