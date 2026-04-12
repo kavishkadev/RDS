@@ -1,4 +1,4 @@
-name: Persistent RDP via DuckDNS
+name: Kavishka
 
 on:
   workflow_dispatch:
@@ -101,81 +101,53 @@ jobs:
             --no-install-recommends
           echo "✅ All packages installed!"
 
-      # ─────────────────────────────────────────
-      # CONFIGURE XRDP
+            # ─────────────────────────────────────────
+      # CONFIGURE XRDP (RELIABLE VERSION)
       # ─────────────────────────────────────────
       - name: 🚀 Configure XRDP
         run: |
-          sudo systemctl stop xrdp xrdp-sesman 2>/dev/null || true
-
-          sudo tee /etc/xrdp/xrdp.ini > /dev/null <<'EOF'
-          [globals]
-          port=3389
-          tcp_nodelay=true
-          security_layer=rdp
-          crypt_level=high
-          certificate=
-          key_file=
-          max_bpp=24
-          xserverbpp=24
-          colordepth=24
-          
-          [xrdp1]
-          name=sesman-any
-          lib=libxup.so
-          username=ask
-          password=ask
-          ip=127.0.0.1
-          port=-1
-          EOF
-          
-          sudo tee /etc/xrdp/sesman.ini > /dev/null <<'EOF'
-          [Globals]
-          ListenAddress=127.0.0.1
-          ListenPort=3350
-          EnableUserWindowManager=true
-          UserWindowManager=startwm.sh
-          DefaultWindowManager=startwm.sh
-          
-          [Security]
-          AllowRootLogin=false
-          MaxLoginRetry=10
-          TerminalServerUsers=rdpuser
-          TerminalServerAdmins=rdpuser
-          
-          [Sessions]
-          MaxSessions=10
-          KillDisconnected=false
-          DisconnectedTimeLimit=0
-          IdleTimeLimit=0
-          EOF
-
-          sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
-          #!/bin/sh
-          if [ -r /etc/default/locale ]; then
-            . /etc/default/locale
-            export LANG LANGUAGE
-          fi
-          startxfce4
-          EOF
-          sudo chmod +x /etc/xrdp/startwm.sh
-
-          sudo bash -c 'echo "startxfce4" > /home/rdpuser/.xsession'
-          sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
-          sudo chmod +x /home/rdpuser/.xsession
-
-          echo "startxfce4" > ~/.xsession
-          chmod +x ~/.xsession
-
-          sudo adduser xrdp ssl-cert
-          sudo xrdp-keygen xrdp auto 2>/dev/null || true
-
-          sudo systemctl start xrdp-sesman || true
+          # Kill any existing xrdp processes
+          sudo pkill -9 xrdp || true
+          sudo pkill -9 xrdp-sesman || true
           sleep 2
-          sudo systemctl start xrdp || true
-          sleep 5
-
-          echo "✅ XRDP active: $(sudo systemctl is-active xrdp)"
+          
+          # Ensure XRDP is installed
+          sudo apt install -y xrdp xorgxrdp
+          
+          # Add user to ssl-cert group
+          sudo adduser xrdp ssl-cert || true
+          
+          # Generate SSL certificate
+          sudo xrdp-keygen xrdp /etc/xrdp/key.pem /etc/xrdp/cert.pem || true
+          
+          # Configure xrdp.ini
+          sudo sed -i 's/3389/3389/g' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/security_layer=rdp/security_layer=rdp/g' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/max_bpp=32/max_bpp=24/g' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/crypt_level=low/crypt_level=high/g' /etc/xrdp/xrdp.ini
+          
+          # Configure sesman
+          sudo sed -i 's/ListenAddress=127.0.0.1/ListenAddress=0.0.0.0/g' /etc/xrdp/sesman.ini
+          
+          # Create .xsession file for rdpuser
+          echo "xfce4-session" | sudo tee /home/rdpuser/.xsession > /dev/null
+          sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
+          sudo chmod 644 /home/rdpuser/.xsession
+          
+          # Start XRDP manually (more reliable than systemctl in GitHub Actions)
+          sudo xrdp || true
+          sudo xrdp-sesman || true
+          
+          sleep 3
+          
+          # Verify it's running
+          echo "=== XRDP Process Check ==="
+          ps aux | grep xrdp | grep -v grep
+          
+          echo "=== Port Check ==="
+          sudo ss -tlnp | grep 3389 || echo "⚠️ Port 3389 not found"
+          
+          echo "✅ XRDP configuration complete"
 
       # ─────────────────────────────────────────
       # DYNAMIC DNS UPDATE (DUCKDNS)
