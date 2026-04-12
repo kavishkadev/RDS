@@ -1,4 +1,4 @@
-name: macOS
+name: macOS Remote Server
 
 on:
   workflow_dispatch:
@@ -72,7 +72,6 @@ jobs:
           sleep 2
           echo "SSH Status:"
           sudo systemsetup -getremotelogin 2>/dev/null || true
-          sudo lsof -i :22 2>/dev/null | head -3 || true
           echo "SSH enabled!"
 
       # ─────────────────────────────────────────
@@ -120,59 +119,94 @@ jobs:
           echo "Installing Tailscale..."
           brew install tailscale 2>/dev/null || true
 
-          # Verify
           if command -v tailscale &>/dev/null; then
-            echo "Tailscale installed: $(tailscale version)"
+            echo "Tailscale installed: $(tailscale version 2>/dev/null || true)"
           else
-            echo "Tailscale not in PATH, checking..."
-            find /usr/local /opt/homebrew -name "tailscale" 2>/dev/null | head -3
+            echo "Looking for tailscale binary..."
+            find /usr/local /opt/homebrew -name "tailscale" 2>/dev/null | head -3 || true
           fi
 
       # ─────────────────────────────────────────
-      # CONNECT TAILSCALE (with timeout fix)
+      # CONNECT TAILSCALE (fixed with retries)
       # ─────────────────────────────────────────
       - name: Connect Tailscale
         run: |
-          # Start tailscaled daemon in background
+          # Kill any existing tailscaled
+          sudo pkill tailscaled 2>/dev/null || true
+          sleep 3
+
+          # Start fresh tailscaled daemon
           sudo tailscaled \
             --state=/tmp/tailscaled.state \
             --socket=/tmp/tailscaled.sock \
-            --port=41641 \
             > /tmp/tailscaled.log 2>&1 &
 
           echo "Waiting for tailscaled to start..."
-          sleep 8
-
-          # Connect with 30 second timeout to prevent hanging
-          echo "Connecting to Tailscale..."
-          sudo timeout 30 tailscale up \
-            --authkey="${{ secrets.TS_AUTHKEY }}" \
-            --hostname="github-macos" \
-            --accept-routes \
-            --socket=/tmp/tailscaled.sock \
-            2>/dev/null || true
-
-          echo "Waiting for IP assignment..."
           sleep 10
 
-          # Get Tailscale IP
+          # Try connecting up to 5 times
+          TS_CONNECTED=false
+          for i in 1 2 3 4 5; do
+            echo "Connection attempt $i/5..."
+            sudo tailscale up \
+              --authkey="${{ secrets.TS_AUTHKEY }}" \
+              --hostname="github-macos" \
+              --accept-routes \
+              --socket=/tmp/tailscaled.sock \
+              --timeout=20s \
+              2>/dev/null
+            EXIT=$?
+            echo "Exit code: $EXIT"
+            if [ $EXIT -eq 0 ]; then
+              TS_CONNECTED=true
+              echo "Connected successfully!"
+              break
+            fi
+            echo "Retrying in 5s..."
+            sleep 5
+          done
+
+          sleep 10
+
+          # Try all methods to get IP
+          TS_IP=""
+
+          # Method 1: via socket
           TS_IP=$(sudo tailscale ip -4 \
             --socket=/tmp/tailscaled.sock 2>/dev/null | \
             head -1 | tr -d '[:space:]')
 
-          # Fallback if socket method fails
+          # Method 2: direct command
           if [ -z "$TS_IP" ]; then
-            TS_IP=$(tailscale ip -4 2>/dev/null | head -1 | tr -d '[:space:]')
+            TS_IP=$(tailscale ip -4 2>/dev/null | \
+              head -1 | tr -d '[:space:]')
           fi
 
+          # Method 3: from status output
           if [ -z "$TS_IP" ]; then
-            echo "Could not get IP. Tailscale log:"
-            cat /tmp/tailscaled.log | tail -20
-            TS_IP="pending-check-tailscale-dashboard"
+            TS_IP=$(sudo tailscale status \
+              --socket=/tmp/tailscaled.sock 2>/dev/null | \
+              grep "100\." | awk '{print $1}' | head -1)
+          fi
+
+          # Method 4: from log file
+          if [ -z "$TS_IP" ]; then
+            TS_IP=$(grep -oE "100\.[0-9]+\.[0-9]+\.[0-9]+" \
+              /tmp/tailscaled.log 2>/dev/null | head -1)
+          fi
+
+          # Show full log if still no IP
+          if [ -z "$TS_IP" ]; then
+            echo "===== TAILSCALE LOG ====="
+            cat /tmp/tailscaled.log
+            echo "===== END LOG ====="
+            echo "Check https://login.tailscale.com/admin/machines"
+            echo "Find github-macos and copy its IP"
+            TS_IP="check-tailscale-dashboard"
           fi
 
           echo "========================================"
-          echo "  Tailscale Connected!"
+          echo "  Tailscale Status: $TS_CONNECTED"
           echo "  FIXED IP  : $TS_IP"
           echo "  USERNAME  : runner"
           echo "  PASSWORD  : your VNC_PASSWORD secret"
@@ -181,8 +215,8 @@ jobs:
           echo "========================================"
 
           # Save connection info
-          echo "MACOS_IP=$TS_IP"             > vnc-info.txt
-          echo "USERNAME=runner"             >> vnc-info.txt
+          echo "MACOS_IP=$TS_IP"              > vnc-info.txt
+          echo "USERNAME=runner"              >> vnc-info.txt
           echo "VNC_PORT=5900"               >> vnc-info.txt
           echo "SSH_PORT=22"                 >> vnc-info.txt
           echo "SSH_CMD=ssh runner@$TS_IP"   >> vnc-info.txt
@@ -224,16 +258,15 @@ jobs:
           echo "  1. Install Tailscale on your PC"
           echo "     tailscale.com/download"
           echo "  2. Login with SAME Tailscale account"
-          echo "  3. VNC: Open RealVNC -> $TS_IP:5900"
-          echo "  4. SSH: Use PuTTY or CMD"
-          echo "     ssh runner@$TS_IP"
+          echo "  3. VNC: Open RealVNC -> $TS_IP"
+          echo "  4. SSH: CMD -> ssh runner@$TS_IP"
           echo "========================================"
           echo "  macOS   : $(sw_vers -productVersion)"
           echo "  RAM     : $(( $(sysctl -n hw.memsize) / 1073741824 )) GB"
           echo "  CPU     : $(sysctl -n hw.ncpu) cores"
           echo "  DISK    : $(df -h / | awk 'NR==2{print $4}') free"
           echo "========================================"
-          echo "  IP is FIXED - same every restart!"
+          echo "  IP FIXED - same every restart!"
           echo "  Auto-restarts every 5 hours"
           echo "  Files backed up on each restart"
           echo "========================================"
@@ -257,7 +290,6 @@ jobs:
             --exclude='**/__pycache__' \
             --exclude='**/node_modules' \
             --exclude='**/.DS_Store' \
-            --exclude='~/Library' \
             ~/Desktop \
             ~/Documents \
             ~/Downloads \
