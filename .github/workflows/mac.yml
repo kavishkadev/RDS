@@ -19,6 +19,7 @@ jobs:
           echo "========================================"
           echo "macOS Version : $(sw_vers -productVersion)"
           echo "Build         : $(sw_vers -buildVersion)"
+          echo "Architecture  : $(uname -m)"
           echo "CPU           : $(sysctl -n machdep.cpu.brand_string)"
           echo "Cores         : $(sysctl -n hw.ncpu)"
           echo "RAM           : $(( $(sysctl -n hw.memsize) / 1073741824 )) GB"
@@ -57,9 +58,7 @@ jobs:
       # ─────────────────────────────────────────
       - name: Set user password
         run: |
-          # Set password using dscl
           sudo dscl . -passwd /Users/runner "${{ secrets.VNC_PASSWORD }}" 2>/dev/null || true
-          # Fallback method
           echo "runner:${{ secrets.VNC_PASSWORD }}" | sudo chpasswd 2>/dev/null || true
           echo "Password set for runner!"
 
@@ -80,9 +79,9 @@ jobs:
       # ─────────────────────────────────────────
       - name: Enable Screen Sharing VNC
         run: |
-          echo "Enabling VNC screen sharing..."
+          echo "Enabling VNC..."
 
-          # Primary method - ARD kickstart
+          # Method 1 - ARD kickstart
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure \
@@ -94,23 +93,21 @@ jobs:
             -restart -agent \
             2>/dev/null || true
 
-          # Secondary method - launchctl
+          # Method 2 - launchctl
           sudo launchctl load -w \
             /System/Library/LaunchDaemons/com.apple.screensharing.plist \
             2>/dev/null || true
 
-          # Tertiary method - defaults
+          # Method 3 - defaults
           sudo defaults write \
             /var/db/launchd.db/com.apple.launchd/overrides.plist \
             com.apple.screensharing \
             -dict Disabled -bool false 2>/dev/null || true
 
           sleep 5
-
-          # Verify VNC port
-          echo "VNC port check:"
-          sudo lsof -i :5900 2>/dev/null | head -5 || echo "Port 5900 status unknown"
           echo "VNC enabled!"
+          echo "VNC Port 5900:"
+          sudo lsof -i :5900 2>/dev/null | head -5 || echo "Port checked"
 
       # ─────────────────────────────────────────
       # INSTALL TOOLS
@@ -122,27 +119,37 @@ jobs:
           echo "Done!"
 
       # ─────────────────────────────────────────
-      # INSTALL TAILSCALE (direct binary - most reliable)
+      # INSTALL TAILSCALE (arch-aware)
       # ─────────────────────────────────────────
       - name: Install Tailscale
         run: |
-          echo "Installing Tailscale via direct binary..."
+          # Detect architecture
+          ARCH=$(uname -m)
+          echo "Architecture: $ARCH"
 
-          # Get latest version
-          TS_VERSION=$(curl -s https://pkgs.tailscale.com/stable/ | \
-            grep -oE 'tailscale_[0-9]+\.[0-9]+\.[0-9]+_amd64' | \
-            head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-
-          if [ -z "$TS_VERSION" ]; then
-            TS_VERSION="1.96.4"
+          if [ "$ARCH" = "arm64" ]; then
+            TS_ARCH="arm64"
+          else
+            TS_ARCH="amd64"
           fi
+          echo "Tailscale arch: $TS_ARCH"
 
-          echo "Using Tailscale version: $TS_VERSION"
+          # Use known stable version
+          TS_VERSION="1.96.4"
+          echo "Tailscale version: $TS_VERSION"
 
-          # Download tarball
-          curl -fsSL \
-            "https://pkgs.tailscale.com/stable/tailscale_${TS_VERSION}_amd64.tgz" \
-            -o /tmp/tailscale.tgz
+          # Download correct binary for this arch
+          DOWNLOAD_URL="https://pkgs.tailscale.com/stable/tailscale_${TS_VERSION}_${TS_ARCH}.tgz"
+          echo "Downloading: $DOWNLOAD_URL"
+
+          curl -fsSL "$DOWNLOAD_URL" -o /tmp/tailscale.tgz
+          if [ $? -ne 0 ]; then
+            echo "Download failed! Trying alternate version..."
+            TS_VERSION="1.80.0"
+            curl -fsSL \
+              "https://pkgs.tailscale.com/stable/tailscale_${TS_VERSION}_${TS_ARCH}.tgz" \
+              -o /tmp/tailscale.tgz
+          fi
 
           # Extract
           tar -xzf /tmp/tailscale.tgz -C /tmp/
@@ -150,28 +157,35 @@ jobs:
           echo "Extracted to: /tmp/$TS_DIR"
 
           # Install binaries
-          sudo cp "/tmp/$TS_DIR/tailscale" /usr/local/bin/
-          sudo cp "/tmp/$TS_DIR/tailscaled" /usr/local/bin/
+          sudo cp "/tmp/$TS_DIR/tailscale"  /usr/local/bin/tailscale
+          sudo cp "/tmp/$TS_DIR/tailscaled" /usr/local/bin/tailscaled
           sudo chmod +x /usr/local/bin/tailscale
           sudo chmod +x /usr/local/bin/tailscaled
 
-          echo "Tailscale version: $(tailscale version)"
-          echo "Tailscale installed!"
+          # Verify correct arch binary
+          echo "Binary info:"
+          file /usr/local/bin/tailscale
+          file /usr/local/bin/tailscaled
+
+          echo "Version check:"
+          /usr/local/bin/tailscale version
+          echo "Tailscale installed successfully!"
 
       # ─────────────────────────────────────────
       # CONNECT TAILSCALE
       # ─────────────────────────────────────────
       - name: Connect Tailscale
         run: |
-          # Kill any existing processes
-          sudo pkill tailscaled 2>/dev/null || true
+          # Kill any existing tailscaled
+          sudo pkill -9 tailscaled 2>/dev/null || true
           sleep 3
 
-          # Create state directory
+          # Create directories
           sudo mkdir -p /var/lib/tailscale
+          sudo mkdir -p /var/run
 
           # Start tailscaled daemon
-          echo "Starting tailscaled..."
+          echo "Starting tailscaled daemon..."
           sudo /usr/local/bin/tailscaled \
             --state=/var/lib/tailscale/tailscaled.state \
             --socket=/var/run/tailscaled.socket \
@@ -180,52 +194,64 @@ jobs:
           DAEMON_PID=$!
           echo "tailscaled PID: $DAEMON_PID"
 
-          # Wait for daemon to be ready
-          echo "Waiting for daemon..."
-          for i in {1..15}; do
+          # Wait for socket to be ready
+          echo "Waiting for socket..."
+          for i in {1..20}; do
             sleep 2
             if [ -S /var/run/tailscaled.socket ]; then
-              echo "Daemon ready!"
+              echo "Socket ready after ${i}x2 seconds!"
               break
             fi
-            echo "Waiting... $i/15"
+            echo "Waiting... $i/20"
           done
 
-          # Connect to Tailscale
-          echo "Connecting..."
+          # Show daemon status
+          if [ -S /var/run/tailscaled.socket ]; then
+            echo "Daemon is running!"
+          else
+            echo "WARNING: Socket not found. Checking log..."
+            cat /tmp/tailscaled.log
+          fi
+
+          # Connect to Tailscale network
+          echo "Connecting to Tailscale..."
           sudo /usr/local/bin/tailscale up \
-            --authkey="${{ secrets.TS_AUTHKEY }}" \
+            --authkey="${{ secrets.TS_AUTHKEY_MAC }}" \
             --hostname="github-macos-vnc" \
             --accept-routes \
             --socket=/var/run/tailscaled.socket \
-            2>&1 &
+            2>/tmp/tsup.log &
 
-          # Wait for connection
-          echo "Waiting for IP..."
+          # Poll for IP address
+          echo "Waiting for Tailscale IP..."
           TS_IP=""
-          for i in {1..30}; do
+          for i in {1..40}; do
             sleep 3
             TS_IP=$(sudo /usr/local/bin/tailscale ip -4 \
               --socket=/var/run/tailscaled.socket 2>/dev/null | \
               head -1 | tr -d '[:space:]')
+
             if [[ "$TS_IP" == 100.* ]]; then
-              echo "Got IP: $TS_IP"
+              echo "Got Tailscale IP: $TS_IP"
               break
             fi
-            echo "Attempt $i/30 - waiting for IP..."
+            echo "Attempt $i/40 - no IP yet..."
           done
 
-          # Show log if no IP
+          # Show logs if IP not found
           if [[ "$TS_IP" != 100.* ]]; then
-            echo "===== TAILSCALE LOG ====="
-            cat /tmp/tailscaled.log
-            echo "===== END ====="
-            echo "Check: https://login.tailscale.com/admin/machines"
+            echo "===== tailscaled LOG ====="
+            cat /tmp/tailscaled.log || true
+            echo "===== tailscale up LOG ====="
+            cat /tmp/tsup.log || true
+            echo "============================="
+            echo "Go to: https://login.tailscale.com/admin/machines"
+            echo "Find: github-macos-vnc and copy its IP"
             TS_IP="check-tailscale-dashboard"
           fi
 
           echo "========================================"
-          echo "  Tailscale Connected!"
+          echo "  TAILSCALE CONNECTED!"
           echo "  FIXED IP  : $TS_IP"
           echo "  USERNAME  : runner"
           echo "  PASSWORD  : your VNC_PASSWORD secret"
@@ -233,13 +259,14 @@ jobs:
           echo "  SSH PORT  : 22"
           echo "========================================"
 
-          # Save info
-          echo "MACOS_IP=$TS_IP"            > vnc-info.txt
-          echo "USERNAME=runner"            >> vnc-info.txt
-          echo "VNC_PORT=5900"              >> vnc-info.txt
-          echo "SSH_PORT=22"               >> vnc-info.txt
-          echo "SSH_CMD=ssh runner@$TS_IP" >> vnc-info.txt
-          echo "VNC_CONNECT=$TS_IP:5900"   >> vnc-info.txt
+          # Save all connection info
+          echo "MACOS_IP=$TS_IP"              > vnc-info.txt
+          echo "USERNAME=runner"              >> vnc-info.txt
+          echo "PASSWORD=VNC_PASSWORD_secret" >> vnc-info.txt
+          echo "VNC_PORT=5900"               >> vnc-info.txt
+          echo "SSH_PORT=22"                 >> vnc-info.txt
+          echo "VNC_CONNECT=$TS_IP:5900"     >> vnc-info.txt
+          echo "SSH_CMD=ssh runner@$TS_IP"   >> vnc-info.txt
           echo "STARTED=$(date '+%Y-%m-%d %H:%M:%S UTC')"       >> vnc-info.txt
           echo "EXPIRES=$(date -v+5H '+%Y-%m-%d %H:%M:%S UTC')" >> vnc-info.txt
 
@@ -266,29 +293,35 @@ jobs:
           echo "  USERNAME     : runner"
           echo "  PASSWORD     : your VNC_PASSWORD secret"
           echo "========================================"
-          echo "  VNC (RealVNC Viewer):"
-          echo "  Host   : $TS_IP"
-          echo "  Port   : 5900"
-          echo "  Enter  : $TS_IP:5900"
+          echo "  VNC - RealVNC Viewer:"
+          echo "  Open RealVNC -> type: $TS_IP"
+          echo "  Password: your VNC_PASSWORD"
           echo "========================================"
-          echo "  SSH (Terminal):"
+          echo "  SSH - Terminal:"
           echo "  ssh runner@$TS_IP"
           echo "========================================"
-          echo "  HOW TO CONNECT FROM WINDOWS:"
-          echo "  1. Install Tailscale on Windows PC"
-          echo "     tailscale.com/download"
+          echo "  STEPS TO CONNECT FROM WINDOWS:"
+          echo "  1. Install Tailscale on your Windows PC"
+          echo "     -> tailscale.com/download"
           echo "  2. Login with SAME Tailscale account"
-          echo "  3. Open RealVNC Viewer"
-          echo "  4. Type: $TS_IP"
-          echo "  5. Password: your VNC_PASSWORD"
+          echo "     used to create TS_AUTHKEY_MAC"
+          echo "  3. Install RealVNC Viewer on Windows"
+          echo "     -> realvnc.com/download/viewer"
+          echo "  4. Open RealVNC Viewer"
+          echo "  5. In address bar type: $TS_IP"
+          echo "  6. Press Enter"
+          echo "  7. Enter password: your VNC_PASSWORD"
+          echo "  8. Click OK - you are in macOS!"
           echo "========================================"
           echo "  macOS   : $(sw_vers -productVersion)"
+          echo "  Arch    : $(uname -m)"
           echo "  RAM     : $(( $(sysctl -n hw.memsize) / 1073741824 )) GB"
           echo "  CPU     : $(sysctl -n hw.ncpu) cores"
           echo "  DISK    : $(df -h / | awk 'NR==2{print $4}') free"
           echo "========================================"
           echo "  IP FIXED - same every restart!"
           echo "  Auto-restarts every 5 hours"
+          echo "  Files backed up on each restart"
           echo "========================================"
 
       # ─────────────────────────────────────────
@@ -297,7 +330,9 @@ jobs:
       - name: Active session 4h 30min
         run: |
           TS_IP=$(grep "MACOS_IP" vnc-info.txt | cut -d= -f2)
-          echo "Session active - VNC: $TS_IP:5900"
+          echo "Session active!"
+          echo "VNC: $TS_IP:5900"
+          echo "SSH: ssh runner@$TS_IP"
           sleep 16200
 
       # ─────────────────────────────────────────
