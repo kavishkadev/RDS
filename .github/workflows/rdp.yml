@@ -11,17 +11,11 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      # ─────────────────────────────────────────
-      # SYSTEM OPTIMIZATION
-      # ─────────────────────────────────────────
       - name: ⚡ Optimize system
         run: |
           sudo systemctl disable --now apport unattended-upgrades apt-daily.timer apt-daily-upgrade.timer motd-news.timer 2>/dev/null || true
           sudo swapoff -a || true
 
-      # ─────────────────────────────────────────
-      # CHECKOUT & GIT CONFIG
-      # ─────────────────────────────────────────
       - name: 📦 Checkout repo
         uses: actions/checkout@v3
         with:
@@ -33,43 +27,47 @@ jobs:
           git config user.name "RDP Bot"
           git config user.email "rdp@github.com"
 
-      # ─────────────────────────────────────────
-      # CREATE USER
-      # ─────────────────────────────────────────
       - name: 👤 Create RDP user
         run: |
           sudo useradd -m -s /bin/bash kavishka
           echo "kavishka:${{ secrets.RDP_PASSWORD }}" | sudo chpasswd
           sudo usermod -aG sudo kavishka
-          sudo usermod -aG audio,video kavishka
+          sudo usermod -aG audio,video,input kavishka
 
-      # ─────────────────────────────────────────
-      # RESTORE BACKUP
-      # ─────────────────────────────────────────
       - name: 💾 Restore backup
         run: |
           if [ -f "backup/kavishka-backup.tar.gz" ]; then
             sudo tar -xzf backup/kavishka-backup.tar.gz -C /home/kavishka/
             sudo chown -R kavishka:kavishka /home/kavishka/
-            echo "✅ Backup restored!"
-          else
-            echo "⚠️ No backup found. Starting fresh."
           fi
 
       # ─────────────────────────────────────────
-      # INSTALL DESKTOP + XRDP
+      # INSTALL DESKTOP (COMPLETE FIX)
       # ─────────────────────────────────────────
-      - name: 📥 Install XFCE + XRDP
+      - name: 📥 Install XFCE + XRDP with all dependencies
         run: |
           sudo apt update -qq
+          
+          # Install XFCE with ALL required components
           sudo DEBIAN_FRONTEND=noninteractive apt install -y \
             xfce4 \
             xfce4-goodies \
-            xfce4-terminal \
+            xfce4-session \
+            xfce4-settings \
+            xfce4-panel \
+            xfce4-whiskermenu-plugin \
+            xfconf \
             xrdp \
             xorgxrdp \
             dbus-x11 \
+            dbus \
             pulseaudio \
+            gnome-keyring \
+            policykit-1 \
+            gvfs \
+            gvfs-backends \
+            gvfs-fuse \
+            light-locker \
             firefox \
             wget \
             curl \
@@ -79,45 +77,84 @@ jobs:
             unzip \
             fonts-noto \
             --no-install-recommends
-          echo "✅ Desktop packages installed!"
+          
+          echo "✅ All packages installed!"
 
       # ─────────────────────────────────────────
-      # CONFIGURE XRDP (FIXED PERMISSIONS)
+      # FIX XRDP SESSION (COMPLETE REWRITE)
       # ─────────────────────────────────────────
-      - name: 🚀 Configure XRDP
+      - name: 🚀 Fix XRDP Session (Complete Rewrite)
         run: |
-          # Kill any existing xrdp processes
+          # Kill any existing processes
           sudo pkill -9 xrdp || true
           sudo pkill -9 xrdp-sesman || true
           sleep 2
           
-          # Create .xsession file (FIXES failsafe error)
+          # ── FIX 1: Create proper .xsession ──
           cat << 'EOF' | sudo tee /home/kavishka/.xsession > /dev/null
-          #!/bin/sh
+          #!/bin/bash
+          # Export necessary environment variables
           export XDG_CONFIG_DIRS=/etc/xdg:/usr/local/etc/xdg
           export XDG_DATA_DIRS=/usr/local/share:/usr/share:/var/lib/snapd/desktop
+          export XDG_RUNTIME_DIR=/run/user/$(id -u)
+          export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus
+          export GTK_MODULES=gail:atk-bridge
+          export GTK_IM_MODULE=ibus
+          export QT_IM_MODULE=ibus
+          export XMODIFIERS=@im=ibus
+          
+          # Create runtime directory if it doesn't exist
+          mkdir -p $XDG_RUNTIME_DIR
+          chmod 700 $XDG_RUNTIME_DIR
+          
+          # Start D-Bus session
+          if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+            eval $(dbus-launch --sh-syntax)
+          fi
+          
+          # Start GNOME keyring
+          eval $(gnome-keyring-daemon --start --components=gpg,pkcs11,secrets,ssh)
+          
+          # Unset session manager to prevent conflicts
           unset SESSION_MANAGER
-          unset DBUS_SESSION_BUS_ADDRESS
-          exec startxfce4
+          
+          # Start XFCE4 session
+          exec /usr/bin/xfce4-session
           EOF
+          
           sudo chown kavishka:kavishka /home/kavishka/.xsession
           sudo chmod 755 /home/kavishka/.xsession
           
-          # Configure XRDP settings
+          # ── FIX 2: Configure XRDP properly ──
           sudo sed -i 's/max_bpp=32/max_bpp=24/g' /etc/xrdp/xrdp.ini
           sudo sed -i 's/crypt_level=low/crypt_level=high/g' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/security_layer=rdp/security_layer=rdp/g' /etc/xrdp/xrdp.ini
           
-          # Start XRDP
-          sudo xrdp || true
-          sudo xrdp-sesman || true
+          # ── FIX 3: Allow user to run XFCE ──
+          echo "allowed_users=anybody" | sudo tee /etc/X11/Xwrapper.config
           
+          # ── FIX 4: Create D-Bus machine ID ──
+          sudo dbus-uuidgen --ensure=/etc/machine-id
+          
+          # ── FIX 5: Start XRDP with proper environment ──
+          sudo systemctl start dbus || true
+          
+          # Start xrdp-sesman first
+          sudo /usr/sbin/xrdp-sesman --daemon || true
+          sleep 2
+          
+          # Then start xrdp
+          sudo /usr/sbin/xrdp --nodaemon &
           sleep 3
           
-          # Verify it's running
-          echo "=== XRDP Status ==="
-          ps aux | grep xrdp | grep -v grep
-          sudo ss -tlnp | grep 3389 || echo "⚠️ Port 3389 not found"
-          echo "✅ XRDP configured and running!"
+          # Verify
+          echo "=== Checking processes ==="
+          ps aux | grep -E "(xrdp|xfce|dbus)" | grep -v grep || echo "⚠️ Some processes may not show yet"
+          
+          echo "=== Checking port 3389 ==="
+          sudo ss -tlnp | grep 3389 || echo "⚠️ Port 3389 not listening yet"
+          
+          echo "✅ XRDP configuration complete!"
 
       # ─────────────────────────────────────────
       # SETUP TAILSCALE
@@ -126,23 +163,15 @@ jobs:
         env:
           TS_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          # Install Tailscale
           curl -fsSL https://tailscale.com/install.sh | sh
-          
-          # Connect to Tailscale
           sudo tailscale up --authkey $TS_AUTH_KEY \
             --accept-routes \
-            --hostname "ubuntu-2404-rdp"
+            --hostname "ubuntu-rdp-fixed"
           
-          # Get Tailscale IP
           TAILSCALE_IP=$(tailscale ip -4)
           echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
           
-          echo "========================================"
-          echo "  ✅ TAILSCALE CONNECTED!"
-          echo "========================================"
-          echo "  🌐 Tailscale IP: $TAILSCALE_IP"
-          echo "========================================"
+          echo "✅ Tailscale IP: $TAILSCALE_IP"
 
       # ─────────────────────────────────────────
       # SHOW CONNECTION INFO
@@ -152,103 +181,34 @@ jobs:
           echo "========================================"
           echo "  🖥️  RDP CONNECTION DETAILS"
           echo "========================================"
-          echo ""
           echo "  🌐 TAILSCALE IP: ${{ env.TAILSCALE_IP }}"
           echo "  👤 USERNAME  : kavishka"
-          echo "  🔑 PASSWORD  : (from secrets.RDP_PASSWORD)"
+          echo "  🔑 PASSWORD  : (from secrets)"
           echo "  🔌 PORT      : 3389"
-          echo ""
           echo "========================================"
           echo "  💡 HOW TO CONNECT:"
+          echo "  1. Install Tailscale on your device"
+          echo "  2. Sign in with same account"
+          echo "  3. Open Remote Desktop (mstsc)"
+          echo "  4. Connect to: ${{ env.TAILSCALE_IP }}"
+          echo "  5. Login: kavishka / your password"
           echo "========================================"
-          echo ""
-          echo "  1️⃣  Install Tailscale on your device:"
-          echo "     📥 Windows: https://tailscale.com/download"
-          echo "     📥 macOS: https://tailscale.com/download"
-          echo "     📥 Linux: curl -fsSL https://tailscale.com/install.sh | sh"
-          echo "     📥 Android: Play Store"
-          echo "     📥 iOS: App Store"
-          echo ""
-          echo "  2️⃣  Sign in to Tailscale (same account)"
-          echo ""
-          echo "  3️⃣  Open Remote Desktop Connection:"
-          echo "     💻 Windows: Win+R → mstsc"
-          echo "     🐧 Linux: xfreerdp or Remmina"
-          echo "     🍎 macOS: Microsoft Remote Desktop"
-          echo ""
-          echo "  4️⃣  Connect to: ${{ env.TAILSCALE_IP }}"
-          echo ""
-          echo "  5️⃣  Enter credentials:"
-          echo "      Username: kavishka"
-          echo "      Password: (your secret password)"
-          echo ""
-          echo "========================================"
-          echo "  📊 SYSTEM INFO:"
-          echo "========================================"
-          echo "  OS: Ubuntu 24.04 (via GitHub Actions)"
-          echo "  Desktop: XFCE 4"
-          echo "  XRDP: $(pgrep -x xrdp > /dev/null && echo '✅ Running' || echo '❌ Stopped')"
-          echo "  RAM: $(free -h | grep Mem | awk '{print $3"/"$2}')"
-          echo "  CPU: $(nproc) cores"
-          echo "  Disk: $(df -h / | tail -1 | awk '{print $3"/"$2}')"
-          echo "========================================"
-          echo "  ⏳ Session duration: 4 hours 30 minutes"
-          echo "  🔄 Auto-restart: Enabled"
+          echo "  ⏳ Session: 4h 30min | Auto-restart"
           echo "========================================"
 
-      # ─────────────────────────────────────────
-      # SESSION (4h 30min then backup)
-      # ─────────────────────────────────────────
-      - name: ⏳ Active session (4h 30min)
-        run: |
-          echo "⏳ Keeping session alive for 4 hours 30 minutes..."
-          for i in {1..54}; do
-            sleep 300
-            if [ $((i % 6)) -eq 0 ]; then
-              echo "⏱️  Session active: $((i * 5 / 60))h $((i * 5 % 60))m elapsed"
-            fi
-          done
+      - name: ⏳ Keep alive (4h 30min)
+        run: sleep 16200
 
-      # ─────────────────────────────────────────
-      # BACKUP TO REPO
-      # ─────────────────────────────────────────
-      - name: 💾 Backup user data to repo
+      - name: 💾 Backup
         run: |
-          echo "💾 Starting backup..."
           mkdir -p backup
+          sudo tar -czf backup/kavishka-backup.tar.gz -C /home/kavishka . \
+            --exclude='.cache' --exclude='*.log' --exclude='__pycache__' 2>/dev/null
+          git add backup/
+          git commit -m "💾 Backup $(date +%Y-%m-%d)" || true
+          git push origin HEAD || true
 
-          sudo tar -czf backup/kavishka-backup.tar.gz \
-            -C /home/kavishka . \
-            --exclude='.cache' \
-            --exclude='.mozilla/firefox/*/cache2' \
-            --exclude='*.log' \
-            --exclude='.local/share/recently-used.xbel' \
-            --exclude='__pycache__' \
-            --exclude='node_modules' \
-            --exclude='.npm' \
-            2>/dev/null
-
-          BACKUP_SIZE=$(du -sh backup/kavishka-backup.tar.gz | cut -f1)
-          echo "✅ Backup complete! Size: $BACKUP_SIZE"
-
-      - name: 📤 Push backup to GitHub
-        run: |
-          git add backup/kavishka-backup.tar.gz
-          if git diff --staged --quiet; then
-            echo "⚠️ No changes to backup."
-          else
-            git commit -m "💾 Auto backup - $(date '+%Y-%m-%d %H:%M:%S UTC')"
-            git push origin HEAD
-            echo "✅ Backup pushed successfully!"
-          fi
-
-      # ─────────────────────────────────────────
-      # TRIGGER NEXT RUN
-      # ─────────────────────────────────────────
-      - name: 🔄 Trigger next session
+      - name: 🔄 Trigger next
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: |
-          gh workflow run rdp.yml
-          echo "✅ Next session triggered!"
-          echo "⏳ New RDP ready in ~3 minutes..."
+        run: gh workflow run rdp.yml
