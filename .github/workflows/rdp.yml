@@ -1,0 +1,328 @@
+name: Kavishka
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */5 * * *'
+
+jobs:
+  rdp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      # ─────────────────────────────────────────
+      # SYSTEM OPTIMIZATION
+      # ─────────────────────────────────────────
+      - name: ⚡ Optimize system performance
+        run: |
+          # Disable unnecessary services
+          sudo systemctl disable --now apport unattended-upgrades \
+            apt-daily.timer apt-daily-upgrade.timer \
+            motd-news.timer fwupd 2>/dev/null || true
+
+          # Optimize RAM usage
+          sudo sysctl -w vm.swappiness=10
+          sudo sysctl -w vm.vfs_cache_pressure=50
+          sudo sysctl -w net.core.rmem_max=134217728
+          sudo sysctl -w net.core.wmem_max=134217728
+
+          # Create 4GB swap for extra memory
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "✅ Swap created: $(free -h | grep Swap)"
+
+      # ─────────────────────────────────────────
+      # CHECKOUT & GIT CONFIG
+      # ─────────────────────────────────────────
+      - name: 📦 Checkout repo
+        uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 0
+
+      - name: 🔧 Configure Git
+        run: |
+          git config user.name "RDP Bot"
+          git config user.email "rdpbot@github.com"
+
+      # ─────────────────────────────────────────
+      # CREATE USER
+      # ─────────────────────────────────────────
+      - name: 👤 Create RDP user
+        run: |
+          sudo useradd -m -s /bin/bash rdpuser
+          echo "rdpuser:${{ secrets.RDP_PASSWORD }}" | sudo chpasswd
+          sudo usermod -aG sudo rdpuser
+          sudo usermod -aG audio,video rdpuser
+
+      # ─────────────────────────────────────────
+      # RESTORE BACKUP
+      # ─────────────────────────────────────────
+      - name: 💾 Restore previous session data
+        run: |
+          if [ -f "backup/rdpuser-backup.tar.gz" ]; then
+            echo "✅ Backup found! Restoring..."
+            sudo tar -xzf backup/rdpuser-backup.tar.gz \
+              -C /home/rdpuser/
+            sudo chown -R rdpuser:rdpuser /home/rdpuser/
+            echo "✅ Restore complete! Size: $(du -sh /home/rdpuser | cut -f1)"
+          else
+            echo "⚠️ No backup found. Starting fresh."
+          fi
+
+      # ─────────────────────────────────────────
+      # INSTALL PACKAGES (parallel for speed)
+      # ─────────────────────────────────────────
+      - name: 📥 Install XFCE + XRDP + Tools
+        run: |
+          sudo apt update -qq
+
+          # Install all at once for speed
+          sudo DEBIAN_FRONTEND=noninteractive apt install -y \
+            xfce4 \
+            xfce4-goodies \
+            xfce4-terminal \
+            xrdp \
+            xorgxrdp \
+            dbus-x11 \
+            pulseaudio \
+            firefox \
+            wget \
+            curl \
+            git \
+            htop \
+            neofetch \
+            unzip \
+            zip \
+            python3 \
+            python3-pip \
+            nodejs \
+            npm \
+            fonts-noto \
+            --no-install-recommends
+
+          echo "✅ All packages installed!"
+
+      # ─────────────────────────────────────────
+      # CONFIGURE XRDP FOR HIGH PERFORMANCE
+      # ─────────────────────────────────────────
+      - name: 🚀 Configure XRDP (high performance)
+        run: |
+          # XRDP main config
+          sudo tee /etc/xrdp/xrdp.ini > /dev/null <<EOF
+          [globals]
+          ini_version=1
+          fork=true
+          port=3389
+          tcp_nodelay=true
+          tcp_keepalive=true
+          security_layer=rdp
+          crypt_level=high
+          certificate=
+          key_file=
+          ssl_protocols=TLSv1.2, TLSv1.3
+          autorun=
+          allow_channels=true
+          allow_multimon=true
+          bitmap_cache=true
+          bitmap_compression=true
+          bulk_compression=true
+          max_bpp=32
+          xserverbpp=24
+          colordepth=24
+          rem_con_timeout=10
+          EOF
+
+          # XRDP session config
+          sudo tee /etc/xrdp/sesman.ini > /dev/null <<EOF
+          [Globals]
+          ListenAddress=127.0.0.1
+          ListenPort=3350
+          EnableUserWindowManager=true
+          UserWindowManager=startwm.sh
+          DefaultWindowManager=startwm.sh
+
+          [Security]
+          AllowRootLogin=false
+          MaxLoginRetry=10
+          TerminalServerUsers=rdpuser
+          TerminalServerAdmins=rdpuser
+
+          [Sessions]
+          MaxSessions=10
+          KillDisconnected=false
+          DisconnectedTimeLimit=0
+          IdleTimeLimit=0
+          EOF
+
+          # Set XFCE4 as default session
+          sudo bash -c 'echo "startxfce4" > /etc/xrdp/startwm.sh'
+          sudo chmod +x /etc/xrdp/startwm.sh
+
+          echo "startxfce4" | sudo tee /home/rdpuser/.xsession
+          sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
+          chmod +x /home/rdpuser/.xsession
+
+          # Fix XRDP colors & performance
+          sudo sed -i 's/max_bpp=32/max_bpp=24/g' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/xserverbpp=24/xserverbpp=24/g' /etc/xrdp/xrdp.ini
+
+          sudo adduser xrdp ssl-cert
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+          sleep 3
+          echo "✅ XRDP status: $(sudo systemctl is-active xrdp)"
+
+      # ─────────────────────────────────────────
+      # XFCE PERFORMANCE TWEAKS
+      # ─────────────────────────────────────────
+      - name: 🎨 Optimize XFCE for performance
+        run: |
+          sudo -u rdpuser mkdir -p \
+            /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml
+
+          # Disable compositing (big performance boost)
+          sudo -u rdpuser tee \
+            /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml \
+            > /dev/null <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <channel name="xfwm4" version="1.0">
+            <property name="general" type="empty">
+              <property name="use_compositing" type="bool" value="false"/>
+              <property name="frame_opacity" type="int" value="100"/>
+              <property name="shadow_opacity" type="int" value="0"/>
+              <property name="show_frame_shadow" type="bool" value="false"/>
+              <property name="show_popup_shadow" type="bool" value="false"/>
+              <property name="vblank_mode" type="string" value="off"/>
+            </property>
+          </channel>
+          EOF
+
+          # Disable animations
+          sudo -u rdpuser tee \
+            /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml \
+            > /dev/null <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <channel name="xsettings" version="1.0">
+            <property name="Net" type="empty">
+              <property name="ThemeName" type="string" value="Greybird"/>
+              <property name="IconThemeName" type="string" value="elementary-xfce"/>
+            </property>
+            <property name="Gtk" type="empty">
+              <property name="EnableAnimations" type="bool" value="false"/>
+              <property name="CursorThemeSize" type="int" value="16"/>
+            </property>
+          </channel>
+          EOF
+
+          sudo chown -R rdpuser:rdpuser /home/rdpuser/.config
+          echo "✅ XFCE optimized!"
+
+      # ─────────────────────────────────────────
+      # INSTALL PLAYIT.GG
+      # ─────────────────────────────────────────
+      - name: 🌐 Install playit.gg
+        run: |
+          curl -SsL https://playit-cloud.github.io/ppa/key.gpg | \
+            sudo gpg --dearmor \
+            -o /etc/apt/trusted.gpg.d/playit.gpg
+          echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] \
+            https://playit-cloud.github.io/ppa/data ./" | \
+            sudo tee /etc/apt/sources.list.d/playit-cloud.list
+          sudo apt update -qq
+          sudo apt install -y playit
+          echo "✅ playit.gg installed!"
+
+      - name: 🔗 Start playit tunnel & show claim URL
+        run: |
+          playit > /tmp/playit.log 2>&1 &
+          echo "⏳ Waiting for claim URL..."
+          for i in {1..60}; do
+            sleep 5
+            if grep -q "playit.gg/claim" /tmp/playit.log 2>/dev/null; then
+              CLAIM=$(grep "playit.gg/claim" /tmp/playit.log | tail -1)
+              echo "========================================"
+              echo "  🔗 CLAIM URL: $CLAIM"
+              echo "  👉 Visit above URL to get RDP address"
+              echo "========================================"
+              break
+            fi
+            echo "⏳ Attempt $i/60..."
+          done
+
+      # ─────────────────────────────────────────
+      # SHOW CONNECTION INFO
+      # ─────────────────────────────────────────
+      - name: 📋 Connection Info
+        run: |
+          echo "========================================"
+          echo "  🖥️  RDP CONNECTION DETAILS"
+          echo "========================================"
+          echo "  USERNAME : rdpuser"
+          echo "  PASSWORD : (your RDP_PASSWORD secret)"
+          echo "  PORT     : 3389"
+          echo "  COLOR    : 24-bit"
+          echo "  SESSION  : ~5 hours then auto-restart"
+          echo "========================================"
+          echo "  💡 Windows: Win+R → mstsc"
+          echo "  💡 Linux  : remmina or xfreerdp"
+          echo "========================================"
+          echo "  XRDP: $(sudo systemctl is-active xrdp)"
+          echo "  RAM : $(free -h | grep Mem | awk '{print $3"/"$2}')"
+          echo "  CPU : $(nproc) cores"
+          echo "  SWAP: $(free -h | grep Swap | awk '{print $3"/"$2}')"
+          echo "========================================"
+
+      # ─────────────────────────────────────────
+      # SESSION (4h 30min then backup)
+      # ─────────────────────────────────────────
+      - name: ⏳ Active session (4h 30min)
+        run: sleep 16200
+
+      # ─────────────────────────────────────────
+      # BACKUP TO REPO
+      # ─────────────────────────────────────────
+      - name: 💾 Backup user data to repo
+        run: |
+          echo "💾 Starting backup..."
+          mkdir -p backup
+
+          sudo tar -czf backup/rdpuser-backup.tar.gz \
+            -C /home/rdpuser . \
+            --exclude='.cache' \
+            --exclude='.mozilla/firefox/*/cache2' \
+            --exclude='.config/google-chrome/Default/Cache' \
+            --exclude='*.log' \
+            --exclude='.local/share/recently-used.xbel' \
+            --exclude='__pycache__' \
+            --exclude='node_modules' \
+            --exclude='.npm' \
+            2>/dev/null
+
+          BACKUP_SIZE=$(du -sh backup/rdpuser-backup.tar.gz | cut -f1)
+          echo "✅ Backup complete! Size: $BACKUP_SIZE"
+
+      - name: 📤 Push backup to GitHub
+        run: |
+          git add backup/rdpuser-backup.tar.gz
+          if git diff --staged --quiet; then
+            echo "⚠️ No changes to backup."
+          else
+            git commit -m "💾 Auto backup - $(date '+%Y-%m-%d %H:%M:%S UTC')"
+            git push origin HEAD
+            echo "✅ Backup pushed successfully!"
+          fi
+
+      # ─────────────────────────────────────────
+      # TRIGGER NEXT RUN
+      # ─────────────────────────────────────────
+      - name: 🔄 Trigger next session
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          gh workflow run rdp.yml
+          echo "✅ Next session triggered!"
+          echo "⏳ New RDP ready in ~3 minutes..."
