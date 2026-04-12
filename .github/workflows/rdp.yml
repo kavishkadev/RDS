@@ -1,86 +1,277 @@
-name: Kavishka RDP (playit.gg Test)
+name: Kavishka
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */5 * * *'
+    - cron: '0 */5 * * *'  # Every 5 hours
 
 jobs:
   rdp:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 350  # 5 hours 50 minutes
 
     steps:
-      - name: 📦 Checkout
+      # ─────────────────────────────────────────
+      # SYSTEM OPTIMIZATION
+      # ─────────────────────────────────────────
+      - name: ⚡ Optimize system performance
+        run: |
+          sudo systemctl disable --now apport unattended-upgrades \
+            apt-daily.timer apt-daily-upgrade.timer \
+            motd-news.timer fwupd 2>/dev/null || true
+
+          sudo sysctl -w vm.swappiness=10
+          sudo sysctl -w vm.vfs_cache_pressure=50
+          sudo sysctl -w net.core.rmem_max=134217728
+          sudo sysctl -w net.core.wmem_max=134217728
+
+          sudo swapoff -a
+          sudo rm -f /swapfile
+          sudo dd if=/dev/zero of=/swapfile bs=1M count=4096 status=progress
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "✅ Swap created: $(free -h | grep Swap)"
+
+      # ─────────────────────────────────────────
+      # CHECKOUT & GIT CONFIG
+      # ─────────────────────────────────────────
+      - name: 📦 Checkout repo
         uses: actions/checkout@v3
         with:
           token: ${{ secrets.GH_PAT }}
           fetch-depth: 0
 
-      - name: 👤 Create user
+      - name: 🔧 Configure Git
+        run: |
+          git config user.name "RDP Bot"
+          git config user.email "rdpbot@github.com"
+
+      # ─────────────────────────────────────────
+      # CREATE USER
+      # ─────────────────────────────────────────
+      - name: 👤 Create RDP user
         run: |
           sudo useradd -m -s /bin/bash kavishka
           echo "kavishka:${{ secrets.RDP_PASSWORD }}" | sudo chpasswd
           sudo usermod -aG sudo kavishka
+          sudo usermod -aG audio,video kavishka
+          echo "✅ User 'kavishka' created!"
 
-      - name: 📥 Install XRDP
+      # ─────────────────────────────────────────
+      # RESTORE BACKUP
+      # ─────────────────────────────────────────
+      - name: 💾 Restore previous session data
+        run: |
+          if [ -f "backup/kavishka-backup.tar.gz" ]; then
+            echo "✅ Backup found! Restoring..."
+            sudo tar -xzf backup/kavishka-backup.tar.gz -C /home/kavishka/
+            sudo chown -R kavishka:kavishka /home/kavishka/
+            echo "✅ Restore complete! Size: $(du -sh /home/kavishka | cut -f1)"
+          else
+            echo "⚠️ No backup found. Starting fresh."
+          fi
+
+      # ─────────────────────────────────────────
+      # INSTALL PACKAGES
+      # ─────────────────────────────────────────
+      - name: 📥 Install XFCE + XRDP + Tools
         run: |
           sudo apt update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt install -y \
-            xfce4 xfce4-goodies xrdp xorgxrdp --no-install-recommends
+            xfce4 \
+            xfce4-goodies \
+            xfce4-terminal \
+            xrdp \
+            xorgxrdp \
+            dbus-x11 \
+            pulseaudio \
+            firefox \
+            wget \
+            curl \
+            git \
+            htop \
+            neofetch \
+            unzip \
+            zip \
+            python3 \
+            python3-pip \
+            nodejs \
+            npm \
+            fonts-noto \
+            --no-install-recommends
+          echo "✅ All packages installed!"
+
+      # ─────────────────────────────────────────
+      # CONFIGURE XRDP
+      # ─────────────────────────────────────────
+      - name: 🚀 Configure XRDP
+        run: |
+          # Kill any existing xrdp processes
+          sudo pkill -9 xrdp || true
+          sudo pkill -9 xrdp-sesman || true
+          sleep 2
+          
+          # Create .xsession file
           echo "startxfce4" | sudo tee /home/kavishka/.xsession > /dev/null
           sudo chown kavishka:kavishka /home/kavishka/.xsession
-
-      - name: 🚀 Start XRDP
-        run: |
+          sudo chmod 644 /home/kavishka/.xsession
+          
+          # Configure xrdp.ini for better performance
+          sudo sed -i 's/max_bpp=32/max_bpp=24/g' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/crypt_level=low/crypt_level=high/g' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/security_layer=rdp/security_layer=rdp/g' /etc/xrdp/xrdp.ini
+          
+          # Start XRDP
           sudo xrdp || true
           sudo xrdp-sesman || true
+          
           sleep 3
+          
+          # Verify it's running
+          echo "=== XRDP Status ==="
+          ps aux | grep xrdp | grep -v grep
+          sudo ss -tlnp | grep 3389 || echo "⚠️ Port 3389 not found"
+          echo "✅ XRDP configured and running!"
 
-      - name: 🌐 Setup playit.gg (Test)
+      # ─────────────────────────────────────────
+      # SETUP TAILSCALE
+      # ─────────────────────────────────────────
+      - name: 🌐 Setup Tailscale
+        env:
+          TS_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          # Download playit agent
-          wget -q https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux-amd64
-          chmod +x playit-linux-amd64
+          # Install Tailscale
+          curl -fsSL https://tailscale.com/install.sh | sh
           
-          echo "🚀 Starting playit.gg tunnel..."
-          # This may fail due to GitHub firewall - that's expected
-          ./playit-linux-amd64 --tunnel-type tcp --local-port 3389 > /tmp/playit.log 2>&1 &
+          # Start Tailscale with auth key
+          sudo tailscale up --authkey $TS_AUTH_KEY \
+            --accept-routes \
+            --hostname "github-runner-rdp"
           
-          sleep 15
+          # Get Tailscale IP
+          TAILSCALE_IP=$(tailscale ip -4)
+          echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
           
-          echo "=== playit.gg Log ==="
-          cat /tmp/playit.log
-          echo "====================="
+          # Get Tailscale hostname
+          TS_HOSTNAME=$(hostname -f 2>/dev/null || echo "github-runner-rdp")
+          echo "TS_HOSTNAME=$TS_HOSTNAME" >> $GITHUB_ENV
           
-          if grep -qi "forwarding\|tunnel.*ready\|connected" /tmp/playit.log; then
-            echo "✅ Tunnel might be working! Check logs for address."
-          else
-            echo "⚠️ Tunnel likely failed (GitHub firewall blocks outbound TCP)."
-            echo "💡 Try EU.org + Cloudflare Tunnel instead (confirmed working)."
-          fi
+          echo "========================================"
+          echo "  ✅ TAILSCALE CONNECTED!"
+          echo "========================================"
+          echo "  🌐 Tailscale IP: $TAILSCALE_IP"
+          echo "  🏷️  Hostname: $TS_HOSTNAME"
+          echo "========================================"
 
+      # ─────────────────────────────────────────
+      # SHOW CONNECTION INFO
+      # ─────────────────────────────────────────
       - name: 📋 Connection Info
         run: |
           echo "========================================"
           echo "  🖥️  RDP CONNECTION DETAILS"
           echo "========================================"
-          echo "  If playit.gg worked:"
-          echo "     - Check logs above for your address"
-          echo "     - Format: xxx.playit.gg:port"
           echo ""
-          echo "  If it failed (likely):"
-          echo "     ✅ Working alternative: EU.org + Cloudflare"
-          echo "        1. Register: https://nic.eu.org"
-          echo "        2. Wait 1-3 days"
-          echo "        3. Add to Cloudflare + use TCP tunnel"
-          echo "        4. Connect to: rdp.kavishka.eu.org"
+          echo "  🌐 TAILSCALE IP: ${{ env.TAILSCALE_IP }}"
+          echo "  🏷️  Hostname: ${{ env.TS_HOSTNAME }}"
+          echo ""
+          echo "  👤 USERNAME  : kavishka"
+          echo "  🔑 PASSWORD  : (from secrets.RDP_PASSWORD)"
+          echo "  🔌 PORT      : 3389"
+          echo ""
+          echo "========================================"
+          echo "  💡 HOW TO CONNECT:"
+          echo "========================================"
+          echo ""
+          echo "  1️⃣  Install Tailscale on your device:"
+          echo "     📥 Windows: https://tailscale.com/download"
+          echo "     📥 macOS: https://tailscale.com/download"
+          echo "     📥 Linux: curl -fsSL https://tailscale.com/install.sh | sh"
+          echo "     📥 Android: Play Store"
+          echo "     📥 iOS: App Store"
+          echo ""
+          echo "  2️⃣  Sign in to Tailscale (same account)"
+          echo ""
+          echo "  3️⃣  Open Remote Desktop Connection:"
+          echo "     💻 Windows: Win+R → mstsc"
+          echo "     🐧 Linux: xfreerdp or Remmina"
+          echo "     🍎 macOS: Microsoft Remote Desktop"
+          echo ""
+          echo "  4️⃣  Connect to: ${{ env.TAILSCALE_IP }}"
+          echo "      Or use hostname: ${{ env.TS_HOSTNAME }}"
+          echo ""
+          echo "  5️⃣  Enter credentials:"
+          echo "      Username: kavishka"
+          echo "      Password: (your secret password)"
+          echo ""
+          echo "========================================"
+          echo "  📊 SYSTEM INFO:"
+          echo "========================================"
+          echo "  XRDP: $(pgrep -x xrdp > /dev/null && echo '✅ Running' || echo '❌ Stopped')"
+          echo "  RAM: $(free -h | grep Mem | awk '{print $3"/"$2}')"
+          echo "  CPU: $(nproc) cores"
+          echo "  Disk: $(df -h / | tail -1 | awk '{print $3"/"$2}')"
+          echo "========================================"
+          echo "  ⏳ Session duration: 4 hours 30 minutes"
+          echo "  🔄 Auto-restart: Enabled"
           echo "========================================"
 
-      - name: ⏳ Keep alive
-        run: sleep 16200
+      # ─────────────────────────────────────────
+      # SESSION (4h 30min then backup)
+      # ─────────────────────────────────────────
+      - name: ⏳ Active session (4h 30min)
+        run: |
+          echo "⏳ Keeping session alive for 4 hours 30 minutes..."
+          # Keep alive with periodic status updates
+          for i in {1..54}; do
+            sleep 300  # Every 5 minutes
+            if [ $((i % 6)) -eq 0 ]; then
+              echo "⏱️  Session active: $((i * 5 / 60))h $((i * 5 % 60))m elapsed"
+            fi
+          done
 
-      - name: 🔄 Trigger next
+      # ─────────────────────────────────────────
+      # BACKUP TO REPO
+      # ─────────────────────────────────────────
+      - name: 💾 Backup user data to repo
+        run: |
+          echo "💾 Starting backup..."
+          mkdir -p backup
+
+          sudo tar -czf backup/kavishka-backup.tar.gz \
+            -C /home/kavishka . \
+            --exclude='.cache' \
+            --exclude='.mozilla/firefox/*/cache2' \
+            --exclude='.config/google-chrome/Default/Cache' \
+            --exclude='*.log' \
+            --exclude='.local/share/recently-used.xbel' \
+            --exclude='__pycache__' \
+            --exclude='node_modules' \
+            --exclude='.npm' \
+            2>/dev/null
+
+          BACKUP_SIZE=$(du -sh backup/kavishka-backup.tar.gz | cut -f1)
+          echo "✅ Backup complete! Size: $BACKUP_SIZE"
+
+      - name: 📤 Push backup to GitHub
+        run: |
+          git add backup/kavishka-backup.tar.gz
+          if git diff --staged --quiet; then
+            echo "⚠️ No changes to backup."
+          else
+            git commit -m "💾 Auto backup - $(date '+%Y-%m-%d %H:%M:%S UTC')"
+            git push origin HEAD
+            echo "✅ Backup pushed successfully!"
+          fi
+
+      # ─────────────────────────────────────────
+      # TRIGGER NEXT RUN
+      # ─────────────────────────────────────────
+      - name: 🔄 Trigger next session
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: gh workflow run rdp.yml
+        run: |
+          gh workflow run rdp.yml
+          echo "✅ Next session triggered!"
+          echo "⏳ New RDP ready in ~3 minutes..."
