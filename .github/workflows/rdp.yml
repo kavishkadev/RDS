@@ -1,9 +1,9 @@
-name: Kavishka
+name: Persistent RDP via DuckDNS
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */5 * * *'
+    - cron: '0 */5 * * *'  # Every 5 hours
 
 jobs:
   rdp:
@@ -16,22 +16,17 @@ jobs:
       # ─────────────────────────────────────────
       - name: ⚡ Optimize system performance
         run: |
-          # Disable unnecessary services
           sudo systemctl disable --now apport unattended-upgrades \
             apt-daily.timer apt-daily-upgrade.timer \
             motd-news.timer fwupd 2>/dev/null || true
 
-          # Optimize RAM usage
           sudo sysctl -w vm.swappiness=10
           sudo sysctl -w vm.vfs_cache_pressure=50
           sudo sysctl -w net.core.rmem_max=134217728
           sudo sysctl -w net.core.wmem_max=134217728
 
-          # Remove existing swap first
           sudo swapoff -a
           sudo rm -f /swapfile
-
-          # Create fresh 4GB swap
           sudo dd if=/dev/zero of=/swapfile bs=1M count=4096 status=progress
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -69,8 +64,7 @@ jobs:
         run: |
           if [ -f "backup/rdpuser-backup.tar.gz" ]; then
             echo "✅ Backup found! Restoring..."
-            sudo tar -xzf backup/rdpuser-backup.tar.gz \
-              -C /home/rdpuser/
+            sudo tar -xzf backup/rdpuser-backup.tar.gz -C /home/rdpuser/
             sudo chown -R rdpuser:rdpuser /home/rdpuser/
             echo "✅ Restore complete! Size: $(du -sh /home/rdpuser | cut -f1)"
           else
@@ -108,230 +102,169 @@ jobs:
           echo "✅ All packages installed!"
 
       # ─────────────────────────────────────────
-      # CONFIGURE XRDP FOR HIGH PERFORMANCE
+      # CONFIGURE XRDP
       # ─────────────────────────────────────────
-      - name: 🚀 Configure XRDP (high performance)
+      - name: 🚀 Configure XRDP
         run: |
-          # Stop xrdp first before editing configs
           sudo systemctl stop xrdp xrdp-sesman 2>/dev/null || true
 
-          # Write xrdp.ini cleanly (EOF must be at column 0)
           sudo tee /etc/xrdp/xrdp.ini > /dev/null <<'EOF'
-[globals]
-ini_version=1
-fork=true
-port=3389
-tcp_nodelay=true
-tcp_keepalive=true
-security_layer=rdp
-crypt_level=high
-certificate=
-key_file=
-ssl_protocols=TLSv1.2, TLSv1.3
-autorun=
-allow_channels=true
-allow_multimon=true
-bitmap_cache=true
-bitmap_compression=true
-bulk_compression=true
-max_bpp=24
-xserverbpp=24
-colordepth=24
-rem_con_timeout=10
-
-[Logging]
-LogFile=xrdp.log
-LogLevel=DEBUG
-EnableSyslog=true
-SyslogLevel=DEBUG
-
-[Channels]
-rdpdr=true
-rdpsnd=true
-drdynvc=true
-cliprdr=true
-rail=true
-xrdpvr=true
-
-[xrdp1]
-name=sesman-any
-lib=libxup.so
-username=ask
-password=ask
-ip=127.0.0.1
-port=-1
-xserverbpp=24
-EOF
-
-          # Write sesman.ini cleanly
+          [globals]
+          port=3389
+          tcp_nodelay=true
+          security_layer=rdp
+          crypt_level=high
+          certificate=
+          key_file=
+          max_bpp=24
+          xserverbpp=24
+          colordepth=24
+          
+          [xrdp1]
+          name=sesman-any
+          lib=libxup.so
+          username=ask
+          password=ask
+          ip=127.0.0.1
+          port=-1
+          EOF
+          
           sudo tee /etc/xrdp/sesman.ini > /dev/null <<'EOF'
-[Globals]
-ListenAddress=127.0.0.1
-ListenPort=3350
-EnableUserWindowManager=true
-UserWindowManager=startwm.sh
-DefaultWindowManager=startwm.sh
+          [Globals]
+          ListenAddress=127.0.0.1
+          ListenPort=3350
+          EnableUserWindowManager=true
+          UserWindowManager=startwm.sh
+          DefaultWindowManager=startwm.sh
+          
+          [Security]
+          AllowRootLogin=false
+          MaxLoginRetry=10
+          TerminalServerUsers=rdpuser
+          TerminalServerAdmins=rdpuser
+          
+          [Sessions]
+          MaxSessions=10
+          KillDisconnected=false
+          DisconnectedTimeLimit=0
+          IdleTimeLimit=0
+          EOF
 
-[Security]
-AllowRootLogin=false
-MaxLoginRetry=10
-TerminalServerUsers=rdpuser
-TerminalServerAdmins=rdpuser
-
-[Sessions]
-MaxSessions=10
-KillDisconnected=false
-DisconnectedTimeLimit=0
-IdleTimeLimit=0
-
-[Logging]
-LogFile=xrdp-sesman.log
-LogLevel=DEBUG
-EnableSyslog=true
-SyslogLevel=DEBUG
-EOF
-
-          # Set startwm.sh
           sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
-#!/bin/sh
-if [ -r /etc/default/locale ]; then
-  . /etc/default/locale
-  export LANG LANGUAGE
-fi
-startxfce4
-EOF
+          #!/bin/sh
+          if [ -r /etc/default/locale ]; then
+            . /etc/default/locale
+            export LANG LANGUAGE
+          fi
+          startxfce4
+          EOF
           sudo chmod +x /etc/xrdp/startwm.sh
 
-          # Set .xsession for rdpuser
           sudo bash -c 'echo "startxfce4" > /home/rdpuser/.xsession'
           sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
           sudo chmod +x /home/rdpuser/.xsession
 
-          # Also set for runner user
           echo "startxfce4" > ~/.xsession
           chmod +x ~/.xsession
 
-          # Fix xrdp group permissions
           sudo adduser xrdp ssl-cert
-
-          # Generate xrdp keys if missing
           sudo xrdp-keygen xrdp auto 2>/dev/null || true
 
-          # Start sesman first, then xrdp
           sudo systemctl start xrdp-sesman || true
           sleep 2
           sudo systemctl start xrdp || true
           sleep 5
 
-          # Print full status and logs for debugging
-          echo "======== XRDP STATUS ========"
-          sudo systemctl status xrdp --no-pager || true
-          echo "======== SESMAN STATUS ========"
-          sudo systemctl status xrdp-sesman --no-pager || true
-          echo "======== JOURNAL LOGS ========"
-          sudo journalctl -xeu xrdp.service --no-pager | tail -30 || true
-          echo "======== PORT CHECK ========"
-          sudo ss -tlnp | grep 3389 || echo "⚠️ Port 3389 not listening!"
-          echo "✅ XRDP status: $(sudo systemctl is-active xrdp)"
+          echo "✅ XRDP active: $(sudo systemctl is-active xrdp)"
+
+      # ─────────────────────────────────────────
+      # DYNAMIC DNS UPDATE (DUCKDNS)
+      # ─────────────────────────────────────────
+      - name: 🌐 Update DuckDNS with current IP
+        env:
+          DUCKDNS_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
+          DUCKDNS_DOMAIN: ${{ secrets.DUCKDNS_DOMAIN }}  # e.g., "myrdp" (without .duckdns.org)
+        run: |
+          CURRENT_IP=$(curl -s https://api.ipify.org)
+          echo "📡 Current runner IP: $CURRENT_IP"
+          
+          RESPONSE=$(curl -s "https://www.duckdns.org/update?domains=$DUCKDNS_DOMAIN&token=$DUCKDNS_TOKEN&ip=$CURRENT_IP")
+          echo "🔄 DuckDNS response: $RESPONSE"
+          
+          if echo "$RESPONSE" | grep -q "OK"; then
+            echo "✅ DDNS updated: $DUCKDNS_DOMAIN.duckdns.org → $CURRENT_IP"
+          else
+            echo "⚠️ DDNS update may have failed. Response: $RESPONSE"
+          fi
 
       # ─────────────────────────────────────────
       # XFCE PERFORMANCE TWEAKS
       # ─────────────────────────────────────────
-      - name: 🎨 Optimize XFCE for performance
+      - name: 🎨 Optimize XFCE
         run: |
-          sudo -u rdpuser mkdir -p \
-            /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml
+          sudo -u rdpuser mkdir -p /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml
 
-          # Disable compositing
-          sudo tee \
-            /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml \
-            > /dev/null <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<channel name="xfwm4" version="1.0">
-  <property name="general" type="empty">
-    <property name="use_compositing" type="bool" value="false"/>
-    <property name="frame_opacity" type="int" value="100"/>
-    <property name="shadow_opacity" type="int" value="0"/>
-    <property name="show_frame_shadow" type="bool" value="false"/>
-    <property name="show_popup_shadow" type="bool" value="false"/>
-    <property name="vblank_mode" type="string" value="off"/>
-  </property>
-</channel>
-EOF
+          sudo tee /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml > /dev/null <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <channel name="xfwm4" version="1.0">
+            <property name="general" type="empty">
+              <property name="use_compositing" type="bool" value="false"/>
+              <property name="frame_opacity" type="int" value="100"/>
+              <property name="shadow_opacity" type="int" value="0"/>
+              <property name="show_frame_shadow" type="bool" value="false"/>
+              <property name="show_popup_shadow" type="bool" value="false"/>
+              <property name="vblank_mode" type="string" value="off"/>
+            </property>
+          </channel>
+          EOF
 
-          # Disable animations
-          sudo tee \
-            /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml \
-            > /dev/null <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<channel name="xsettings" version="1.0">
-  <property name="Net" type="empty">
-    <property name="ThemeName" type="string" value="Greybird"/>
-    <property name="IconThemeName" type="string" value="elementary-xfce"/>
-  </property>
-  <property name="Gtk" type="empty">
-    <property name="EnableAnimations" type="bool" value="false"/>
-    <property name="CursorThemeSize" type="int" value="16"/>
-  </property>
-</channel>
-EOF
+          sudo tee /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml > /dev/null <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <channel name="xsettings" version="1.0">
+            <property name="Net" type="empty">
+              <property name="ThemeName" type="string" value="Greybird"/>
+              <property name="IconThemeName" type="string" value="elementary-xfce"/>
+            </property>
+            <property name="Gtk" type="empty">
+              <property name="EnableAnimations" type="bool" value="false"/>
+              <property name="CursorThemeSize" type="int" value="16"/>
+            </property>
+          </channel>
+          EOF
 
           sudo chown -R rdpuser:rdpuser /home/rdpuser/.config
           echo "✅ XFCE optimized!"
 
       # ─────────────────────────────────────────
-      # INSTALL PLAYIT.GG
-      # ─────────────────────────────────────────
-      - name: 🌐 Install playit.gg
-        run: |
-          curl -SsL https://playit-cloud.github.io/ppa/key.gpg | \
-            sudo gpg --dearmor \
-            -o /etc/apt/trusted.gpg.d/playit.gpg
-          echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] \
-            https://playit-cloud.github.io/ppa/data ./" | \
-            sudo tee /etc/apt/sources.list.d/playit-cloud.list
-          sudo apt update -qq
-          sudo apt install -y playit
-          echo "✅ playit.gg installed!"
-
-      - name: 🔗 Start playit tunnel & show claim URL
-        run: |
-          playit > /tmp/playit.log 2>&1 &
-          echo "⏳ Waiting for claim URL..."
-          for i in {1..60}; do
-            sleep 5
-            if grep -q "playit.gg/claim" /tmp/playit.log 2>/dev/null; then
-              CLAIM=$(grep "playit.gg/claim" /tmp/playit.log | tail -1)
-              echo "========================================"
-              echo "  🔗 CLAIM URL: $CLAIM"
-              echo "  👉 Visit above URL to get RDP address"
-              echo "========================================"
-              break
-            fi
-            echo "⏳ Attempt $i/60..."
-          done
-
-      # ─────────────────────────────────────────
       # SHOW CONNECTION INFO
       # ─────────────────────────────────────────
       - name: 📋 Connection Info
+        env:
+          DUCKDNS_DOMAIN: ${{ secrets.DUCKDNS_DOMAIN }}
         run: |
+          CURRENT_IP=$(curl -s https://api.ipify.org)
           echo "========================================"
           echo "  🖥️  RDP CONNECTION DETAILS"
           echo "========================================"
-          echo "  USERNAME : rdpuser"
-          echo "  PASSWORD : (your RDP_PASSWORD secret)"
-          echo "  PORT     : 3389"
-          echo "  COLOR    : 24-bit"
-          echo "  SESSION  : ~5 hours then auto-restart"
+          echo "  🌐 DDNS HOST : ${DUCKDNS_DOMAIN}.duckdns.org"
+          echo "  📡 CURRENT IP: $CURRENT_IP (changes every run)"
+          echo "  👤 USERNAME  : rdpuser"
+          echo "  🔑 PASSWORD  : (from secrets.RDP_PASSWORD)"
+          echo "  🔌 PORT      : 3389"
           echo "========================================"
-          echo "  💡 Windows: Win+R → mstsc"
-          echo "  💡 Linux  : remmina or xfreerdp"
+          echo "  ⚠️ NOTE: IP changes every workflow run!"
+          echo "     DDNS hostname stays the same."
+          echo "     Wait ~1-2 min after workflow starts for DNS to propagate."
           echo "========================================"
-          echo "  XRDP: $(sudo systemctl is-active xrdp)"
-          echo "  RAM : $(free -h | grep Mem | awk '{print $3"/"$2}')"
-          echo "  CPU : $(nproc) cores"
-          echo "  SWAP: $(free -h | grep Swap | awk '{print $3"/"$2}')"
+          echo "  💡 Windows:"
+          echo "     Win+R → mstsc"
+          echo "     Computer: ${DUCKDNS_DOMAIN}.duckdns.org:3389"
+          echo "  💡 Linux:"
+          echo "     xfreerdp /v:${DUCKDNS_DOMAIN}.duckdns.org:3389 /u:rdpuser /p:yourpassword"
+          echo "========================================"
+          echo "  XRDP : $(sudo systemctl is-active xrdp)"
+          echo "  RAM  : $(free -h | grep Mem | awk '{print $3"/"$2}')"
+          echo "  CPU  : $(nproc) cores"
           echo "========================================"
 
       # ─────────────────────────────────────────
