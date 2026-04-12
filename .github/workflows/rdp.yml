@@ -14,66 +14,65 @@ jobs:
       # ─────────────────────────────────────────
       # SHOW SYSTEM INFO
       # ─────────────────────────────────────────
-      - name: 💻 System Info
+      - name: System Info
+        shell: powershell
         run: |
           Write-Host "========================================"
-          Write-Host "  Windows Version:"
+          Write-Host "Windows Version:"
           (Get-WmiObject Win32_OperatingSystem).Caption
-          Write-Host "  CPU Cores: $env:NUMBER_OF_PROCESSORS"
-          Write-Host "  RAM: $([math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB, 2)) GB"
+          Write-Host "CPU Cores: $env:NUMBER_OF_PROCESSORS"
+          $ram = [math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB, 2)
+          Write-Host "RAM: $ram GB"
           Write-Host "========================================"
-        shell: powershell
 
       # ─────────────────────────────────────────
       # CHECKOUT REPO
       # ─────────────────────────────────────────
-      - name: 📦 Checkout repo
+      - name: Checkout repo
         uses: actions/checkout@v3
         with:
           token: ${{ secrets.GH_PAT }}
           fetch-depth: 0
 
-      - name: 🔧 Configure Git
+      - name: Configure Git
+        shell: bash
         run: |
           git config user.name "RDP Bot"
           git config user.email "rdpbot@github.com"
-        shell: bash
 
       # ─────────────────────────────────────────
       # RESTORE BACKUP
       # ─────────────────────────────────────────
-      - name: 💾 Restore previous session data
+      - name: Restore previous session data
+        shell: powershell
         run: |
           if (Test-Path "backup\userdata.zip") {
-            Write-Host "✅ Backup found! Restoring..."
+            Write-Host "Backup found! Restoring..."
             Expand-Archive -Path "backup\userdata.zip" `
               -DestinationPath "C:\Users\runneradmin\" `
               -Force
-            Write-Host "✅ Restore complete!"
+            Write-Host "Restore complete!"
           } else {
-            Write-Host "⚠️ No backup found. Starting fresh."
+            Write-Host "No backup found. Starting fresh."
           }
-        shell: powershell
 
       # ─────────────────────────────────────────
       # SET RDP PASSWORD
       # ─────────────────────────────────────────
-      - name: 🔐 Set RDP credentials
+      - name: Set RDP credentials
+        shell: powershell
         run: |
-          # Set password for runneradmin (built-in admin account)
           $password = "${{ secrets.RDP_PASSWORD }}"
           net user runneradmin $password
-          Write-Host "✅ Password set for runneradmin"
-
-          # Make sure account is enabled
+          Write-Host "Password set for runneradmin"
           net user runneradmin /active:yes
-          Write-Host "✅ Account enabled"
-        shell: powershell
+          Write-Host "Account enabled"
 
       # ─────────────────────────────────────────
       # ENABLE & CONFIGURE RDP
       # ─────────────────────────────────────────
-      - name: 🖥️ Enable RDP
+      - name: Enable RDP
+        shell: powershell
         run: |
           # Enable Remote Desktop
           Set-ItemProperty -Path `
@@ -92,127 +91,153 @@ jobs:
           Set-Service -Name TermService -StartupType Automatic
           Start-Service -Name TermService
 
-          Write-Host "✅ RDP Enabled!"
-          Write-Host "✅ RDP Service: $((Get-Service TermService).Status)"
-        shell: powershell
+          Write-Host "RDP Enabled!"
+          $svc = (Get-Service TermService).Status
+          Write-Host "RDP Service: $svc"
 
       # ─────────────────────────────────────────
       # INSTALL TAILSCALE
       # ─────────────────────────────────────────
-      - name: 🌐 Install Tailscale
-        run: |
-          # Download Tailscale installer
-          Write-Host "📥 Downloading Tailscale..."
-          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" `
-            -OutFile "tailscale-setup.exe"
-
-          # Install silently
-          Write-Host "⚙️ Installing Tailscale..."
-          Start-Process -FilePath "tailscale-setup.exe" `
-            -ArgumentList "/S" `
-            -Wait -NoNewWindow
-
-          Write-Host "✅ Tailscale installed!"
+      - name: Install Tailscale
         shell: powershell
-
-      - name: 🔗 Connect Tailscale (fixed IP)
         run: |
-          # Start Tailscale with auth key
-          $tsKey = "${{ secrets.TS_AUTHKEY }}"
+          Write-Host "Downloading Tailscale..."
 
-          # Connect to Tailscale network
-          & "C:\Program Files\Tailscale\tailscale.exe" up `
-            --authkey=$tsKey `
-            --hostname="github-rdp" `
-            --accept-routes
+          # Use direct MSI/exe download with correct URL
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
+          $out = "$env:TEMP\tailscale-setup.exe"
 
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+
+          Write-Host "Installing Tailscale silently..."
+          $proc = Start-Process -FilePath $out `
+            -ArgumentList "/S" `
+            -Wait -PassThru -NoNewWindow
+
+          Write-Host "Exit code: $($proc.ExitCode)"
+
+          # Wait for service to start
           Start-Sleep -Seconds 10
 
-          # Get Tailscale IP
-          $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+          # Verify install
+          if (Test-Path "C:\Program Files\Tailscale\tailscale.exe") {
+            Write-Host "Tailscale installed successfully!"
+          } else {
+            Write-Host "Tailscale binary not found, trying alternative path..."
+            Get-ChildItem "C:\Program Files\" | Where-Object { $_.Name -like "*tail*" }
+          }
+
+      # ─────────────────────────────────────────
+      # CONNECT TAILSCALE
+      # ─────────────────────────────────────────
+      - name: Connect Tailscale
+        shell: powershell
+        run: |
+          $tsKey = "${{ secrets.TS_AUTHKEY }}"
+
+          # Find tailscale exe
+          $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
+          if (-not (Test-Path $tsExe)) {
+            $tsExe = (Get-ChildItem -Path "C:\Program Files\" `
+              -Recurse -Filter "tailscale.exe" `
+              -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          }
+
+          Write-Host "Using tailscale at: $tsExe"
+
+          # Connect to Tailscale
+          & $tsExe up --authkey=$tsKey --hostname="github-rdp" --accept-routes
+
+          Start-Sleep -Seconds 15
+
+          # Get IP
+          $tsIP = & $tsExe ip -4
           Write-Host "========================================"
-          Write-Host "  ✅ Tailscale Connected!"
-          Write-Host "  🔗 YOUR FIXED RDP IP: $tsIP"
-          Write-Host "  👤 USERNAME: runneradmin"
-          Write-Host "  🔑 PASSWORD: (your RDP_PASSWORD secret)"
-          Write-Host "  🖥️  Open mstsc → Computer: $tsIP"
+          Write-Host "Tailscale Connected!"
+          Write-Host "YOUR FIXED RDP IP: $tsIP"
+          Write-Host "USERNAME: runneradmin"
+          Write-Host "PASSWORD: your RDP_PASSWORD secret"
+          Write-Host "Open mstsc -> Computer: $tsIP"
           Write-Host "========================================"
 
-          # Save IP to file for reference
-          $tsIP | Out-File -FilePath "rdp-info.txt"
-          "USERNAME=runneradmin" | Add-Content "rdp-info.txt"
-          "STARTED=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')" | `
-            Add-Content "rdp-info.txt"
-          "EXPIRES=$(
-            (Get-Date).AddHours(5).ToString('yyyy-MM-dd HH:mm:ss UTC')
-          )" | Add-Content "rdp-info.txt"
-        shell: powershell
+          # Save to file
+          Set-Content -Path "rdp-info.txt" -Value "RDP_IP=$tsIP"
+          Add-Content -Path "rdp-info.txt" -Value "USERNAME=runneradmin"
+          Add-Content -Path "rdp-info.txt" -Value "PORT=3389"
+          $started = Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC"
+          Add-Content -Path "rdp-info.txt" -Value "STARTED=$started"
+          $expires = (Get-Date).AddHours(5).ToString("yyyy-MM-dd HH:mm:ss UTC")
+          Add-Content -Path "rdp-info.txt" -Value "EXPIRES=$expires"
 
       # ─────────────────────────────────────────
       # PUSH RDP INFO TO REPO
       # ─────────────────────────────────────────
-      - name: 📝 Push RDP info to repo
+      - name: Push RDP info to repo
+        shell: bash
         run: |
           git add rdp-info.txt
-          git diff --staged --quiet || git commit -m "🔗 RDP IP - $(date)"
+          git diff --staged --quiet || git commit -m "RDP IP updated - $(date)"
           git push origin HEAD || true
-        shell: bash
 
       # ─────────────────────────────────────────
-      # SHOW FULL CONNECTION DETAILS
+      # SHOW CONNECTION DETAILS
       # ─────────────────────────────────────────
-      - name: 📋 Connection Details
+      - name: Connection Details
+        shell: powershell
         run: |
-          $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+          $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
+          $tsIP = & $tsExe ip -4
+          $ram = [math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB,2)
+          $disk = [math]::Round((Get-PSDrive C).Free/1GB,2)
+
           Write-Host "========================================"
-          Write-Host "  🖥️  WINDOWS 11 RDP DETAILS"
+          Write-Host "  WINDOWS RDP CONNECTION DETAILS"
           Write-Host "========================================"
           Write-Host "  IP       : $tsIP"
           Write-Host "  USERNAME : runneradmin"
-          Write-Host "  PASSWORD : (your RDP_PASSWORD secret)"
+          Write-Host "  PASSWORD : your RDP_PASSWORD secret"
           Write-Host "  PORT     : 3389"
           Write-Host "========================================"
           Write-Host "  HOW TO CONNECT:"
-          Write-Host "  1. Make sure Tailscale is running on YOUR PC"
-          Write-Host "  2. Win+R → type: mstsc → Enter"
-          Write-Host "  3. Computer: $tsIP"
-          Write-Host "  4. Username: runneradmin"
-          Write-Host "  5. Password: your RDP_PASSWORD"
+          Write-Host "  1. Run Tailscale on your Windows PC"
+          Write-Host "  2. Login with same Tailscale account"
+          Write-Host "  3. Win+R -> mstsc -> Enter"
+          Write-Host "  4. Computer: $tsIP"
+          Write-Host "  5. Username: runneradmin"
+          Write-Host "  6. Password: your RDP_PASSWORD"
           Write-Host "========================================"
-          Write-Host "  ✅ IP is FIXED - same every restart!"
-          Write-Host "  ✅ Session auto-restarts every 5 hours"
-          Write-Host "  ✅ Files backed up on each restart"
+          Write-Host "  IP is FIXED - same every restart!"
+          Write-Host "  Session auto-restarts every 5 hours"
+          Write-Host "  Files backed up on each restart"
           Write-Host "========================================"
-          Write-Host "  RAM  : $([math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB,2)) GB"
+          Write-Host "  RAM  : $ram GB"
           Write-Host "  CPU  : $env:NUMBER_OF_PROCESSORS cores"
-          Write-Host "  DISK : $([math]::Round((Get-PSDrive C).Free/1GB,2)) GB free"
+          Write-Host "  DISK : $disk GB free"
           Write-Host "========================================"
-        shell: powershell
 
       # ─────────────────────────────────────────
       # SESSION (4h 30min)
       # ─────────────────────────────────────────
-      - name: ⏳ Active session (4h 30min)
-        run: Start-Sleep -Seconds 16200
+      - name: Active session 4h 30min
         shell: powershell
+        run: Start-Sleep -Seconds 16200
 
       # ─────────────────────────────────────────
       # BACKUP TO REPO
       # ─────────────────────────────────────────
-      - name: 💾 Backup user data
+      - name: Backup user data
+        shell: powershell
         run: |
-          Write-Host "💾 Starting backup..."
+          Write-Host "Starting backup..."
           New-Item -ItemType Directory -Force -Path "backup" | Out-Null
 
-          # Backup Desktop, Documents, Downloads
           $items = @(
             "C:\Users\runneradmin\Desktop",
             "C:\Users\runneradmin\Documents",
-            "C:\Users\runneradmin\Downloads",
-            "C:\Users\runneradmin\AppData\Roaming\Microsoft\Windows\Recent"
+            "C:\Users\runneradmin\Downloads"
           )
 
-          # Only include existing paths
           $existing = $items | Where-Object { Test-Path $_ }
 
           if ($existing.Count -gt 0) {
@@ -222,28 +247,27 @@ jobs:
             $size = [math]::Round(
               (Get-Item "backup\userdata.zip").Length/1MB, 2
             )
-            Write-Host "✅ Backup complete! Size: $size MB"
+            Write-Host "Backup complete! Size: $size MB"
           } else {
-            Write-Host "⚠️ No user data to backup."
+            Write-Host "No user data to backup."
           }
-        shell: powershell
 
-      - name: 📤 Push backup to GitHub
+      - name: Push backup to GitHub
+        shell: bash
         run: |
           git add backup/userdata.zip rdp-info.txt 2>/dev/null || true
           git diff --staged --quiet || \
-            git commit -m "💾 Auto backup - $(date '+%Y-%m-%d %H:%M:%S UTC')"
+            git commit -m "Auto backup - $(date '+%Y-%m-%d %H:%M:%S UTC')"
           git push origin HEAD || true
-        shell: bash
 
       # ─────────────────────────────────────────
       # TRIGGER NEXT RUN
       # ─────────────────────────────────────────
-      - name: 🔄 Trigger next session
+      - name: Trigger next session
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           gh workflow run rdp.yml
-          echo "✅ Next session triggered!"
-          echo "⏳ Windows RDP ready again in ~3 minutes!"
-        shell: bash
+          echo "Next session triggered!"
+          echo "Windows RDP ready again in ~3 minutes!"
