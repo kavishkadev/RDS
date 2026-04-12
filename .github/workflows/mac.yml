@@ -11,25 +11,13 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      # ─────────────────────────────────────────
-      # SYSTEM INFO
-      # ─────────────────────────────────────────
       - name: System Info
         run: |
-          echo "========================================"
-          echo "macOS Version : $(sw_vers -productVersion)"
-          echo "Build         : $(sw_vers -buildVersion)"
-          echo "CPU           : $(sysctl -n machdep.cpu.brand_string)"
-          echo "Cores         : $(sysctl -n hw.ncpu)"
-          echo "RAM           : $(( $(sysctl -n hw.memsize) / 1073741824 )) GB"
-          echo "Disk Free     : $(df -h / | awk 'NR==2{print $4}')"
-          echo "========================================"
+          echo "macOS Version: $(sw_vers -productVersion)"
+          echo "Architecture: $(uname -m)"
 
-      # ─────────────────────────────────────────
-      # CHECKOUT REPO
-      # ─────────────────────────────────────────
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_PAT }}
           fetch-depth: 0
@@ -39,283 +27,187 @@ jobs:
           git config user.name "macOS Bot"
           git config user.email "macosbot@github.com"
 
-      # ─────────────────────────────────────────
-      # RESTORE BACKUP
-      # ─────────────────────────────────────────
-      - name: Restore previous session data
+      # ─── RESTORE BACKUP ───
+      - name: Restore previous session
         run: |
           if [ -f "backup/userdata.tar.gz" ]; then
-            echo "Backup found! Restoring..."
+            echo "Restoring backup..."
             tar -xzf backup/userdata.tar.gz -C ~/ 2>/dev/null || true
-            echo "Restore complete!"
-          else
-            echo "No backup found. Starting fresh."
           fi
 
-      # ─────────────────────────────────────────
-      # SET USER PASSWORD
-      # ─────────────────────────────────────────
+      # ─── SET PASSWORD ───
       - name: Set user password
         run: |
-          # Set password for runner user
-          sudo dscl . -passwd /Users/runner "${{ secrets.VNC_PASSWORD }}" 2>/dev/null || true
+          echo "runner:${{ secrets.VNC_PASSWORD }}" | sudo dscl . -passwd /Users/runner "${{ secrets.VNC_PASSWORD }}"
+          sudo dscl . -create /Users/runner IsHidden bool false
+          echo "Password configured"
 
-          # Alternative method
-          echo "runner:${{ secrets.VNC_PASSWORD }}" | sudo chpasswd 2>/dev/null || true
-
-          echo "Password set for runner!"
-
-      # ─────────────────────────────────────────
-      # ENABLE SSH (Remote Login)
-      # ─────────────────────────────────────────
-      - name: Enable SSH Remote Login
+      # ─── ENABLE SSH ───
+      - name: Enable SSH
         run: |
-          # Enable SSH
-          sudo systemsetup -setremotelogin on 2>/dev/null || true
-          sudo launchctl load -w \
-            /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || true
+          sudo systemsetup -setremotelogin on
+          sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || true
+          echo "SSH enabled"
 
-          # Verify SSH is running
-          sleep 2
-          echo "SSH Status:"
-          sudo systemsetup -getremotelogin 2>/dev/null || true
-          sudo lsof -i :22 2>/dev/null | head -5 || echo "SSH port check done"
-          echo "SSH enabled!"
-
-      # ─────────────────────────────────────────
-      # ENABLE SCREEN SHARING (VNC port 5900)
-      # ─────────────────────────────────────────
-      - name: Enable Screen Sharing VNC
+      # ─── ENABLE VNC ───
+      - name: Enable Screen Sharing
         run: |
-          # Method 1: kickstart ARD agent
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
-            -configure \
-            -access -on \
-            -allowAccessFor -allUsers \
-            -privs -all \
+            -configure -access -on \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw "${{ secrets.VNC_PASSWORD }}" \
-            -restart -agent \
-            2>/dev/null || true
-
-          # Method 2: launchctl
-          sudo launchctl load -w \
-            /System/Library/LaunchDaemons/com.apple.screensharing.plist \
-            2>/dev/null || true
-
-          # Method 3: defaults write
-          sudo defaults write \
-            /var/db/launchd.db/com.apple.launchd/overrides.plist \
-            com.apple.screensharing \
-            -dict Disabled -bool false 2>/dev/null || true
-
+            -restart -agent -privs -all
+          
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
           sleep 3
-          echo "Screen Sharing enabled!"
+          echo "VNC enabled on port 5900"
 
-          # Check port 5900
-          echo "VNC Port Check:"
-          sudo lsof -i :5900 2>/dev/null | head -5 || echo "Port 5900 status checked"
-
-      # ─────────────────────────────────────────
-      # INSTALL HOMEBREW TOOLS
-      # ─────────────────────────────────────────
-      - name: Install useful tools
-        run: |
-          echo "Installing tools..."
-
-          # Install common tools via brew
-          brew install --quiet \
-            wget \
-            curl \
-            git \
-            htop \
-            python3 \
-            node \
-            ffmpeg \
-            yt-dlp \
-            2>/dev/null || true
-
-          echo "Tools installed!"
-          python3 --version || true
-          node --version || true
-
-      # ─────────────────────────────────────────
-      # INSTALL TAILSCALE
-      # ─────────────────────────────────────────
+      # ─── INSTALL TAILSCALE ───
       - name: Install Tailscale
         run: |
-          echo "Installing Tailscale..."
-
-          # Install via brew cask
-          brew install --cask tailscale 2>/dev/null || \
-          brew install tailscale 2>/dev/null || true
-
-          # If brew fails, try direct pkg
+          brew install --cask tailscale || brew install tailscale
+          
+          # Verify installation
           if ! command -v tailscale &>/dev/null; then
-            echo "Trying direct download..."
-            curl -fsSL \
-              "https://pkgs.tailscale.com/stable/tailscale-latest.tgz" \
-              -o /tmp/ts.tgz 2>/dev/null || true
-            tar -xzf /tmp/ts.tgz -C /tmp/ 2>/dev/null || true
-            sudo cp /tmp/tailscale*/tailscale /usr/local/bin/ 2>/dev/null || true
-            sudo cp /tmp/tailscale*/tailscaled /usr/local/bin/ 2>/dev/null || true
+            echo "❌ Tailscale installation failed"
+            exit 1
           fi
+          
+          echo "✅ Tailscale installed: $(tailscale --version)"
 
-          echo "Tailscale install done!"
-
-      # ─────────────────────────────────────────
-      # CONNECT TAILSCALE
-      # ─────────────────────────────────────────
+      # ─── CONNECT TAILSCALE (FIXED) ───
       - name: Connect Tailscale
+        id: tailscale
         run: |
-          # Start tailscaled daemon
+          echo "🔄 Starting Tailscale connection..."
+          
+          # Kill any existing tailscaled
+          sudo pkill tailscaled 2>/dev/null || true
+          sleep 2
+          
+          # Start tailscaled daemon in background
+          echo "📡 Starting tailscaled daemon..."
           sudo tailscaled \
             --state=/tmp/tailscaled.state \
             --socket=/tmp/tailscaled.sock \
             --port=41641 \
             > /tmp/tailscaled.log 2>&1 &
-
-          sleep 8
-
-          # Connect with auth key
+          
+          DAEMON_PID=$!
+          echo "Daemon PID: $DAEMON_PID"
+          
+          # Wait for daemon to be ready
+          echo "⏳ Waiting for daemon..."
+          for i in {1..15}; do
+            if [ -S /tmp/tailscaled.sock ]; then
+              echo "✅ Socket ready after $i seconds"
+              break
+            fi
+            if [ $i -eq 15 ]; then
+              echo "❌ Socket not created. Log:"
+              cat /tmp/tailscaled.log 2>/dev/null || echo "No log"
+              exit 1
+            fi
+            sleep 1
+          done
+          
+          # Authenticate and connect
+          echo "🔐 Authenticating..."
           sudo tailscale up \
             --authkey="${{ secrets.TS_AUTHKEY }}" \
-            --hostname="github-macos" \
+            --hostname="github-macos-$(date +%s)" \
             --accept-routes \
             --socket=/tmp/tailscaled.sock \
-            2>/dev/null || \
-          tailscale up \
-            --authkey="${{ secrets.TS_AUTHKEY }}" \
-            --hostname="github-macos" \
-            --accept-routes \
-            2>/dev/null || true
+            --timeout=60s
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Authentication failed"
+            cat /tmp/tailscaled.log
+            exit 1
+          fi
+          
+          # Get IP address
+          TS_IP=$(sudo tailscale ip -4 --socket=/tmp/tailscaled.sock)
+          
+          if [ -z "$TS_IP" ]; then
+            echo "❌ Failed to get IP"
+            exit 1
+          fi
+          
+          echo "✅ Connected! IP: $TS_IP"
+          
+          # Save connection info
+          echo "MACOS_IP=$TS_IP" > vnc-info.txt
+          echo "USERNAME=runner" >> vnc-info.txt
+          echo "VNC_PORT=5900" >> vnc-info.txt
+          echo "SSH_PORT=22" >> vnc-info.txt
+          echo "STARTED=$(date '+%Y-%m-%d %H:%M:%S UTC')" >> vnc-info.txt
+          echo "DAEMON_PID=$DAEMON_PID" >> vnc-info.txt
+          
+          # Set output for next steps
+          echo "ip=$TS_IP" >> $GITHUB_OUTPUT
 
-          sleep 10
-
-          # Get IP
-          TS_IP=$(tailscale ip -4 2>/dev/null || \
-            sudo tailscale ip -4 \
-            --socket=/tmp/tailscaled.sock 2>/dev/null || \
-            echo "Connecting...")
-
-          echo "========================================"
-          echo "  Tailscale Connected!"
-          echo "  FIXED IP  : $TS_IP"
-          echo "  USERNAME  : runner"
-          echo "  PASSWORD  : your VNC_PASSWORD secret"
-          echo "  VNC PORT  : 5900"
-          echo "  SSH PORT  : 22"
-          echo "========================================"
-
-          # Save info
-          echo "MACOS_IP=$TS_IP"        > vnc-info.txt
-          echo "USERNAME=runner"        >> vnc-info.txt
-          echo "VNC_PORT=5900"          >> vnc-info.txt
-          echo "SSH_PORT=22"            >> vnc-info.txt
-          echo "SSH_CMD=ssh runner@$TS_IP" >> vnc-info.txt
-          echo "STARTED=$(date '+%Y-%m-%d %H:%M:%S UTC')"  >> vnc-info.txt
-          echo "EXPIRES=$(date -v+5H '+%Y-%m-%d %H:%M:%S UTC')" >> vnc-info.txt
-
-      # ─────────────────────────────────────────
-      # PUSH CONNECTION INFO
-      # ─────────────────────────────────────────
-      - name: Push connection info to repo
-        run: |
-          git add vnc-info.txt
-          git diff --staged --quiet || \
-            git commit -m "macOS IP updated - $(date '+%H:%M:%S')"
-          git push origin HEAD || true
-
-      # ─────────────────────────────────────────
-      # SHOW CONNECTION DETAILS
-      # ─────────────────────────────────────────
+      # ─── SHOW CONNECTION INFO ───
       - name: Connection Details
         run: |
-          TS_IP=$(grep "MACOS_IP" vnc-info.txt | cut -d= -f2)
+          TS_IP="${{ steps.tailscale.outputs.ip }}"
+          
           echo "========================================"
-          echo "  macOS REMOTE SERVER - READY!"
+          echo "  🍎 macOS REMOTE SERVER READY!"
           echo "========================================"
-          echo "  TAILSCALE IP : $TS_IP"
-          echo "  USERNAME     : runner"
-          echo "  PASSWORD     : your VNC_PASSWORD secret"
+          echo "  🌐 TAILSCALE IP: $TS_IP"
+          echo "  👤 USERNAME: runner"
+          echo "  🔑 PASSWORD: (your VNC_PASSWORD secret)"
           echo "========================================"
-          echo "  VNC (Screen Sharing):"
-          echo "  App    : RealVNC Viewer"
-          echo "  Host   : $TS_IP"
-          echo "  Port   : 5900"
+          echo "  📺 VNC (Screen Sharing):"
+          echo "     Host: $TS_IP:5900"
+          echo "     Use: RealVNC Viewer or Screen Sharing app"
           echo "========================================"
-          echo "  SSH (Terminal):"
-          echo "  Command: ssh runner@$TS_IP"
-          echo "  Or use any SSH client"
+          echo "  💻 SSH Access:"
+          echo "     ssh runner@$TS_IP"
           echo "========================================"
-          echo "  HOW TO CONNECT:"
-          echo "  1. Install Tailscale on your PC"
-          echo "  2. Login with SAME Tailscale account"
-          echo "  3. For VNC: Open RealVNC -> $TS_IP"
-          echo "  4. For SSH: ssh runner@$TS_IP"
-          echo "========================================"
-          echo "  macOS   : $(sw_vers -productVersion)"
-          echo "  RAM     : $(( $(sysctl -n hw.memsize) / 1073741824 )) GB"
-          echo "  CPU     : $(sysctl -n hw.ncpu) cores"
-          echo "  DISK    : $(df -h / | awk 'NR==2{print $4}') free"
-          echo "========================================"
-          echo "  IP is FIXED - same every restart!"
-          echo "  Auto-restarts every 5 hours"
-          echo "  Files backed up on each restart"
+          echo "  📋 Connection file saved to vnc-info.txt"
           echo "========================================"
 
-      # ─────────────────────────────────────────
-      # SESSION 4h 30min
-      # ─────────────────────────────────────────
-      - name: Active session 4h 30min
-        run: sleep 16200
+      # ─── PUSH INFO TO REPO ───
+      - name: Push connection info
+        run: |
+          git add vnc-info.txt
+          git commit -m "Update macOS IP - $(date '+%H:%M')" || true
+          git push origin HEAD || true
 
-      # ─────────────────────────────────────────
-      # BACKUP TO REPO
-      # ─────────────────────────────────────────
+      # ─── KEEP ALIVE SESSION ───
+      - name: Keep session alive (4h 30m)
+        run: |
+          echo "⏰ Session active for 4h 30m..."
+          echo "💡 Connect via: ssh runner@${{ steps.tailscale.outputs.ip }}"
+          
+          # Keep alive with periodic status
+          for i in {1..270}; do
+            if [ $((i % 30)) -eq 0 ]; then
+              echo "⏳ Session active: $((i/60))h $((i%60))m"
+              # Verify Tailscale still connected
+              tailscale status >/dev/null 2>&1 || echo "⚠️ Tailscale disconnected!"
+            fi
+            sleep 60
+          done
+
+      # ─── BACKUP DATA ───
       - name: Backup user data
         run: |
-          echo "Starting backup..."
           mkdir -p backup
-
           tar -czf backup/userdata.tar.gz \
-            ~/Desktop \
-            ~/Documents \
-            ~/Downloads \
-            ~/Projects 2>/dev/null \
-            --exclude='**/.cache' \
-            --exclude='**/__pycache__' \
-            --exclude='**/node_modules' \
-            --exclude='**/*.DS_Store' \
-            --exclude='~/Library' \
-            2>/dev/null || true
+            ~/Desktop ~/Documents ~/Downloads 2>/dev/null || true
+          
+          git add backup/userdata.tar.gz vnc-info.txt
+          git commit -m "Backup $(date '+%Y-%m-%d')" || true
+          git push || true
 
-          if [ -f backup/userdata.tar.gz ]; then
-            SIZE=$(du -sh backup/userdata.tar.gz | cut -f1)
-            echo "Backup complete! Size: $SIZE"
-          else
-            echo "Nothing to backup yet."
-          fi
-
-      - name: Push backup to GitHub
-        run: |
-          git add backup/userdata.tar.gz vnc-info.txt 2>/dev/null || true
-          if git diff --staged --quiet; then
-            echo "No changes to backup."
-          else
-            git commit -m "Auto backup - $(date '+%Y-%m-%d %H:%M:%S UTC')"
-            git push origin HEAD
-            echo "Backup pushed!"
-          fi
-
-      # ─────────────────────────────────────────
-      # TRIGGER NEXT RUN
-      # ─────────────────────────────────────────
+      # ─── TRIGGER NEXT RUN ───
       - name: Trigger next session
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
-          gh workflow run macos.yml
-          echo "Next session triggered!"
-          echo "macOS remote ready again in about 3 minutes!"
+          gh workflow run "${{ github.workflow }}"
+          echo "✅ Next session triggered!"
