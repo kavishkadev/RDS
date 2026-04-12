@@ -51,18 +51,21 @@ jobs:
           if [ -f "backup/kavishka-backup.tar.gz" ]; then
             sudo tar -xzf backup/kavishka-backup.tar.gz -C /home/kavishka/
             sudo chown -R kavishka:kavishka /home/kavishka/
+            echo "✅ Backup restored!"
+          else
+            echo "⚠️ No backup found. Starting fresh."
           fi
 
       # ─────────────────────────────────────────
       # INSTALL DESKTOP + XRDP
       # ─────────────────────────────────────────
-      - name: 📥 Install XFCE + XRDP + Win11 Theme Tools
+      - name: 📥 Install XFCE + XRDP
         run: |
           sudo apt update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt install -y \
             xfce4 \
             xfce4-goodies \
-            xfce4-whiskermenu-plugin \
+            xfce4-terminal \
             xrdp \
             xorgxrdp \
             dbus-x11 \
@@ -79,16 +82,16 @@ jobs:
           echo "✅ Desktop packages installed!"
 
       # ─────────────────────────────────────────
-      # FIX XRDP SESSION ERROR + APPLY WIN11 THEME
+      # CONFIGURE XRDP (FIXED PERMISSIONS)
       # ─────────────────────────────────────────
-      - name: 🎨 Configure XRDP + Windows 11 Theme
+      - name: 🚀 Configure XRDP
         run: |
-          # ── Fix the "failsafe session" error ──
+          # Kill any existing xrdp processes
           sudo pkill -9 xrdp || true
           sudo pkill -9 xrdp-sesman || true
           sleep 2
-
-          # Create proper .xsession (THIS FIXES YOUR ERROR)
+          
+          # Create .xsession file (FIXES failsafe error)
           cat << 'EOF' | sudo tee /home/kavishka/.xsession > /dev/null
           #!/bin/sh
           export XDG_CONFIG_DIRS=/etc/xdg:/usr/local/etc/xdg
@@ -99,45 +102,22 @@ jobs:
           EOF
           sudo chown kavishka:kavishka /home/kavishka/.xsession
           sudo chmod 755 /home/kavishka/.xsession
-
-          # ── Download & apply Windows 11 theme for XFCE ──
-          mkdir -p /home/kavishka/.themes /home/kavishka/.icons /home/kavishka/.local/share/fonts
           
-          # Win11 GTK Theme
-          wget -q -O /tmp/win11-theme.zip https://github.com/B00merang-Artwork/Windows-11/archive/refs/heads/master.zip
-          unzip -q /tmp/win11-theme.zip -d /tmp/
-          mv /tmp/Windows-11-master /home/kavishka/.themes/Windows-11
+          # Configure XRDP settings
+          sudo sed -i 's/max_bpp=32/max_bpp=24/g' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/crypt_level=low/crypt_level=high/g' /etc/xrdp/xrdp.ini
           
-          # Win11 Icons
-          wget -q -O /tmp/win11-icons.zip https://github.com/B00merang-Artwork/Windows-11/archive/refs/heads/icons.zip
-          unzip -q /tmp/win11-icons.zip -d /tmp/
-          mv /tmp/icons-master /home/kavishka/.icons/Windows-11
-          
-          # Win11 Cursors
-          wget -q -O /tmp/win11-cursors.zip https://github.com/B00merang-Artwork/Windows-11/archive/refs/heads/cursors.zip
-          unzip -q /tmp/win11-cursors.zip -d /tmp/
-          mv /tmp/cursors-master /home/kavishka/.icons/Windows-11-Cursors
-          
-          sudo chown -R kavishka:kavishka /home/kavishka/.themes /home/kavishka/.icons
-
-          # Apply theme via xfconf
-          sudo -u kavishka xfconf-query -c xsettings -p /Net/ThemeName -s "Windows-11" || true
-          sudo -u kavishka xfconf-query -c xsettings -p /Net/IconThemeName -s "Windows-11" || true
-          sudo -u kavishka xfconf-query -c xsettings -p /Gtk/CursorThemeName -s "Windows-11-Cursors" || true
-
-          # Configure panel to look like Windows 11 taskbar
-          sudo -u kavishka xfconf-query -c xfce4-panel -p /panels -t empty -a -n -s 0 || true
-          sudo -u kavishka xfconf-query -c xfce4-panel -p /panels/panel-0/position -s "p=8;x=0;y=0" || true
-          sudo -u kavishka xfconf-query -c xfce4-panel -p /panels/panel-0/length -n 100 || true
-          sudo -u kavishka xfconf-query -c xfce4-panel -p /panels/panel-0/position-locked -n true || true
-          sudo -u kavishka xfconf-query -c xfce4-panel -p /panels/panel-0/disable-struts -n false || true
-
           # Start XRDP
           sudo xrdp || true
           sudo xrdp-sesman || true
+          
           sleep 3
-
-          echo "✅ XRDP fixed & Windows 11 theme applied!"
+          
+          # Verify it's running
+          echo "=== XRDP Status ==="
+          ps aux | grep xrdp | grep -v grep
+          sudo ss -tlnp | grep 3389 || echo "⚠️ Port 3389 not found"
+          echo "✅ XRDP configured and running!"
 
       # ─────────────────────────────────────────
       # SETUP TAILSCALE
@@ -146,12 +126,23 @@ jobs:
         env:
           TS_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
+          # Install Tailscale
           curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey $TS_AUTH_KEY --accept-routes --hostname "ubuntu-win11-rdp"
           
+          # Connect to Tailscale
+          sudo tailscale up --authkey $TS_AUTH_KEY \
+            --accept-routes \
+            --hostname "ubuntu-2404-rdp"
+          
+          # Get Tailscale IP
           TAILSCALE_IP=$(tailscale ip -4)
           echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
-          echo "✅ Tailscale connected! IP: $TAILSCALE_IP"
+          
+          echo "========================================"
+          echo "  ✅ TAILSCALE CONNECTED!"
+          echo "========================================"
+          echo "  🌐 Tailscale IP: $TAILSCALE_IP"
+          echo "========================================"
 
       # ─────────────────────────────────────────
       # SHOW CONNECTION INFO
@@ -161,38 +152,103 @@ jobs:
           echo "========================================"
           echo "  🖥️  RDP CONNECTION DETAILS"
           echo "========================================"
+          echo ""
           echo "  🌐 TAILSCALE IP: ${{ env.TAILSCALE_IP }}"
           echo "  👤 USERNAME  : kavishka"
-          echo "  🔑 PASSWORD  : (from secrets)"
+          echo "  🔑 PASSWORD  : (from secrets.RDP_PASSWORD)"
           echo "  🔌 PORT      : 3389"
+          echo ""
           echo "========================================"
           echo "  💡 HOW TO CONNECT:"
-          echo "  1. Install Tailscale on your device"
-          echo "  2. Sign in with same account"
-          echo "  3. Open Remote Desktop (mstsc)"
-          echo "  4. Connect to: ${{ env.TAILSCALE_IP }}"
-          echo "  5. Login: kavishka / your password"
           echo "========================================"
-          echo "  🎨 Desktop: Ubuntu + Windows 11 Theme"
-          echo "  ⏳ Session: 4h 30min | Auto-restart: Yes"
+          echo ""
+          echo "  1️⃣  Install Tailscale on your device:"
+          echo "     📥 Windows: https://tailscale.com/download"
+          echo "     📥 macOS: https://tailscale.com/download"
+          echo "     📥 Linux: curl -fsSL https://tailscale.com/install.sh | sh"
+          echo "     📥 Android: Play Store"
+          echo "     📥 iOS: App Store"
+          echo ""
+          echo "  2️⃣  Sign in to Tailscale (same account)"
+          echo ""
+          echo "  3️⃣  Open Remote Desktop Connection:"
+          echo "     💻 Windows: Win+R → mstsc"
+          echo "     🐧 Linux: xfreerdp or Remmina"
+          echo "     🍎 macOS: Microsoft Remote Desktop"
+          echo ""
+          echo "  4️⃣  Connect to: ${{ env.TAILSCALE_IP }}"
+          echo ""
+          echo "  5️⃣  Enter credentials:"
+          echo "      Username: kavishka"
+          echo "      Password: (your secret password)"
+          echo ""
+          echo "========================================"
+          echo "  📊 SYSTEM INFO:"
+          echo "========================================"
+          echo "  OS: Ubuntu 24.04 (via GitHub Actions)"
+          echo "  Desktop: XFCE 4"
+          echo "  XRDP: $(pgrep -x xrdp > /dev/null && echo '✅ Running' || echo '❌ Stopped')"
+          echo "  RAM: $(free -h | grep Mem | awk '{print $3"/"$2}')"
+          echo "  CPU: $(nproc) cores"
+          echo "  Disk: $(df -h / | tail -1 | awk '{print $3"/"$2}')"
+          echo "========================================"
+          echo "  ⏳ Session duration: 4 hours 30 minutes"
+          echo "  🔄 Auto-restart: Enabled"
           echo "========================================"
 
       # ─────────────────────────────────────────
-      # KEEP ALIVE & BACKUP
+      # SESSION (4h 30min then backup)
       # ─────────────────────────────────────────
-      - name: ⏳ Keep alive (4h 30min)
-        run: sleep 16200
-
-      - name: 💾 Backup
+      - name: ⏳ Active session (4h 30min)
         run: |
-          mkdir -p backup
-          sudo tar -czf backup/kavishka-backup.tar.gz -C /home/kavishka . \
-            --exclude='.cache' --exclude='*.log' --exclude='__pycache__' 2>/dev/null
-          git add backup/
-          git commit -m "💾 Backup $(date +%Y-%m-%d)" || true
-          git push origin HEAD || true
+          echo "⏳ Keeping session alive for 4 hours 30 minutes..."
+          for i in {1..54}; do
+            sleep 300
+            if [ $((i % 6)) -eq 0 ]; then
+              echo "⏱️  Session active: $((i * 5 / 60))h $((i * 5 % 60))m elapsed"
+            fi
+          done
 
-      - name: 🔄 Trigger next
+      # ─────────────────────────────────────────
+      # BACKUP TO REPO
+      # ─────────────────────────────────────────
+      - name: 💾 Backup user data to repo
+        run: |
+          echo "💾 Starting backup..."
+          mkdir -p backup
+
+          sudo tar -czf backup/kavishka-backup.tar.gz \
+            -C /home/kavishka . \
+            --exclude='.cache' \
+            --exclude='.mozilla/firefox/*/cache2' \
+            --exclude='*.log' \
+            --exclude='.local/share/recently-used.xbel' \
+            --exclude='__pycache__' \
+            --exclude='node_modules' \
+            --exclude='.npm' \
+            2>/dev/null
+
+          BACKUP_SIZE=$(du -sh backup/kavishka-backup.tar.gz | cut -f1)
+          echo "✅ Backup complete! Size: $BACKUP_SIZE"
+
+      - name: 📤 Push backup to GitHub
+        run: |
+          git add backup/kavishka-backup.tar.gz
+          if git diff --staged --quiet; then
+            echo "⚠️ No changes to backup."
+          else
+            git commit -m "💾 Auto backup - $(date '+%Y-%m-%d %H:%M:%S UTC')"
+            git push origin HEAD
+            echo "✅ Backup pushed successfully!"
+          fi
+
+      # ─────────────────────────────────────────
+      # TRIGGER NEXT RUN
+      # ─────────────────────────────────────────
+      - name: 🔄 Trigger next session
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: gh workflow run rdp.yml
+        run: |
+          gh workflow run rdp.yml
+          echo "✅ Next session triggered!"
+          echo "⏳ New RDP ready in ~3 minutes..."
