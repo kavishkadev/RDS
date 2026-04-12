@@ -55,31 +55,49 @@ jobs:
           sudo xrdp-sesman || true
           sleep 3
 
-      - name: 🌐 Cloudflare Tunnel
-        env:
-          CF_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
+      - name: 🌐 Start Cloudflare Quick Tunnel
         run: |
+          # Download cloudflared
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
           
-          cloudflared tunnel --no-autoupdate run --token $CF_TOKEN > /tmp/cf.log 2>&1 &
+          # Start tunnel WITHOUT token (quick tunnel)
+          cloudflared tunnel --url tcp://localhost:3389 > /tmp/cf.log 2>&1 &
+          
           sleep 10
           
-          echo "✅ Tunnel started! Check Cloudflare dashboard for hostname"
+          echo "========================================"
+          echo "  📜 TUNNEL LOG"
+          echo "========================================"
+          cat /tmp/cf.log
+          echo "========================================"
+          
+          # Extract the auto-generated URL
+          TUNNEL_URL=$(grep -oP 'https://\K[^\s]+' /tmp/cf.log | head -1)
+          
+          if [ -n "$TUNNEL_URL" ]; then
+            echo "✅ Tunnel URL: $TUNNEL_URL"
+            echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+          else
+            echo "⚠️ Could not extract URL"
+          fi
 
       - name: 📋 Connection Info
         run: |
           echo "========================================"
-          echo "  ✅ RDP READY!"
+          echo "  🖥️  RDP CONNECTION DETAILS"
           echo "========================================"
-          echo "  👤 Username: kavishka"
-          echo "  🔑 Password: ${{ secrets.RDP_PASSWORD }}"
-          echo ""
-          echo "  🌐 Open https://dash.teams.cloudflare.com/"
-          echo "     to see your tunnel hostname"
+          echo "  🌐 SERVER    : ${{ env.TUNNEL_URL }}"
+          echo "  👤 USERNAME  : kavishka"
+          echo "  🔑 PASSWORD  : (from secrets)"
+          echo "========================================"
+          echo "  💡 Copy the SERVER address above"
+          echo "     and use it in your RDP client!"
+          echo "========================================"
+          echo "  XRDP: $(pgrep -x xrdp > /dev/null && echo '✅ Running' || echo '❌ Stopped')"
           echo "========================================"
 
-      - name: ⏳ Keep alive
+      - name: ⏳ Keep alive (4h 30min)
         run: sleep 16200
 
       - name: 💾 Backup
