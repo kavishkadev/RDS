@@ -131,7 +131,7 @@ jobs:
           Write-Host "RDP Service: $((Get-Service TermService).Status)"
 
       # ─────────────────────────────────────────
-      # CREATE SHARED FOLDER (FIXED with net share)
+      # CREATE SHARED FOLDER
       # ─────────────────────────────────────────
       - name: Create shared folder
         shell: powershell
@@ -141,22 +141,29 @@ jobs:
           # Create folder
           New-Item -ItemType Directory -Force -Path "C:\Transfer" | Out-Null
           
-          # Remove existing share if exists
-          net share Transfer /delete 2>$null
+          # Remove existing share if exists (suppress error if not found)
+          net share Transfer /delete 2>&1 | Out-Null
           
-          # Share using net share (compatible with GitHub runners)
-          net share Transfer=C:\Transfer /GRANT:Everyone,FULL
+          # Share using net share
+          $shareResult = net share Transfer=C:\Transfer /GRANT:Everyone,FULL 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Share created successfully"
+          } else {
+            Write-Host "Warning: Share creation had issues: $shareResult"
+          }
           
           # Set NTFS permissions
-          icacls "C:\Transfer" /grant "Everyone:(OI)(CI)F" /T | Out-Null
+          icacls "C:\Transfer" /grant "Everyone:(OI)(CI)F" /T 2>&1 | Out-Null
           
-          # Allow SMB through firewall (restrict to Tailscale subnet)
+          # Allow SMB through firewall
           netsh advfirewall firewall add rule name="Allow SMB Tailscale" `
-            dir=in action=allow protocol=TCP localport=445 remoteip=100.64.0.0/10 2>$null
+            dir=in action=allow protocol=TCP localport=445 remoteip=100.64.0.0/10 2>&1 | Out-Null
           
-          # Verify
-          net share Transfer
-          Write-Host "Shared folder ready: \\TAILSCALE_IP\Transfer"
+          # Verify share
+          Write-Host "Shared folders:"
+          net share
+          
+          Write-Host "✅ Shared folder ready: \\TAILSCALE_IP\Transfer"
 
       # ─────────────────────────────────────────
       # INSTALL TAILSCALE
