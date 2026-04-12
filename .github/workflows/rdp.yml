@@ -41,18 +41,73 @@ jobs:
           git config user.email "rdpbot@github.com"
 
       # ─────────────────────────────────────────
+      # DISABLE PASSWORD POLICY FIRST
+      # ─────────────────────────────────────────
+      - name: Disable password policy
+        shell: powershell
+        run: |
+          Write-Host "Disabling password complexity policy..."
+
+          # Export current security policy
+          secedit /export /cfg C:\secpol.cfg /quiet
+
+          # Read and modify
+          $content = Get-Content C:\secpol.cfg
+
+          # Disable complexity
+          $content = $content -replace "PasswordComplexity\s*=\s*\d", "PasswordComplexity = 0"
+          # Set minimum length to 1
+          $content = $content -replace "MinimumPasswordLength\s*=\s*\d+", "MinimumPasswordLength = 1"
+          # Disable password history
+          $content = $content -replace "PasswordHistorySize\s*=\s*\d+", "PasswordHistorySize = 0"
+          # Set max password age to 0 (never expires)
+          $content = $content -replace "MaximumPasswordAge\s*=\s*\d+", "MaximumPasswordAge = -1"
+
+          # Save modified policy
+          $content | Set-Content C:\secpol.cfg
+
+          # Apply the modified policy
+          secedit /configure /db C:\Windows\security\local.sdb /cfg C:\secpol.cfg /quiet
+
+          Write-Host "Password policy disabled!"
+
+      # ─────────────────────────────────────────
       # CREATE USER KAVISHKA
       # ─────────────────────────────────────────
       - name: Create user kavishka
-        shell: cmd
+        shell: powershell
         run: |
-          net user kavishka "${{ secrets.RDP_PASSWORD }}" /add /y
-          net localgroup Administrators kavishka /add
-          net localgroup "Remote Desktop Users" kavishka /add
+          $pass = "${{ secrets.RDP_PASSWORD }}"
+
+          Write-Host "Creating user kavishka..."
+
+          # Delete if exists to start fresh
+          net user kavishka /delete 2>$null
+          Start-Sleep -Seconds 2
+
+          # Create user
+          net user kavishka $pass /add /y
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: Failed to create user! Exit: $LASTEXITCODE"
+            exit 1
+          }
+          Write-Host "User created!"
+
+          # Add to groups
+          net localgroup Administrators kavishka /add /y
+          net localgroup "Remote Desktop Users" kavishka /add /y
+
+          # Set account to never expire
           net user kavishka /expires:never
           net user kavishka /active:yes
-          echo User kavishka created successfully!
+
+          # Disable password expiry via wmic
+          wmic useraccount where "name='kavishka'" set PasswordExpires=FALSE
+
+          Write-Host "========================================"
+          Write-Host "User kavishka setup complete!"
           net user kavishka
+          Write-Host "========================================"
 
       # ─────────────────────────────────────────
       # RESTORE BACKUP
@@ -81,7 +136,7 @@ jobs:
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
             -Name "fDenyTSConnections" -Value 0
 
-          # Disable NLA for easier connection
+          # Disable NLA
           Set-ItemProperty `
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "UserAuthentication" -Value 0
@@ -118,19 +173,17 @@ jobs:
           $proc = Start-Process -FilePath $out `
             -ArgumentList "/S" -Wait -PassThru -NoNewWindow
           Write-Host "Installer exit code: $($proc.ExitCode)"
-
           Start-Sleep -Seconds 15
 
           $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
           if (Test-Path $tsPath) {
-            Write-Host "Tailscale installed at $tsPath"
+            Write-Host "Tailscale installed OK!"
           } else {
-            Write-Host "Searching alternate path..."
             $found = Get-ChildItem "C:\Program Files\" `
               -Recurse -Filter "tailscale.exe" -ErrorAction SilentlyContinue |
               Select-Object -First 1
             if ($found) {
-              Write-Host "Found: $($found.FullName)"
+              Write-Host "Found at: $($found.FullName)"
             } else {
               Write-Host "ERROR: tailscale.exe not found!"
               exit 1
@@ -157,16 +210,17 @@ jobs:
           $tsIP = (& $tsExe ip -4).Trim()
           Write-Host "========================================"
           Write-Host "Tailscale Connected!"
-          Write-Host "FIXED RDP IP: $tsIP"
-          Write-Host "USERNAME: kavishka"
-          Write-Host "PASSWORD: your RDP_PASSWORD secret"
+          Write-Host "FIXED RDP IP : $tsIP"
+          Write-Host "USERNAME     : kavishka"
+          Write-Host "PASSWORD     : your RDP_PASSWORD secret"
+          Write-Host "PORT         : 3389"
           Write-Host "========================================"
 
-          Set-Content  -Path "rdp-info.txt" -Value "RDP_IP=$tsIP"
-          Add-Content  -Path "rdp-info.txt" -Value "USERNAME=kavishka"
-          Add-Content  -Path "rdp-info.txt" -Value "PORT=3389"
-          Add-Content  -Path "rdp-info.txt" -Value "STARTED=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') UTC"
-          Add-Content  -Path "rdp-info.txt" -Value "EXPIRES=$((Get-Date).AddHours(5).ToString('yyyy-MM-dd HH:mm:ss')) UTC"
+          Set-Content -Path "rdp-info.txt" -Value "RDP_IP=$tsIP"
+          Add-Content -Path "rdp-info.txt" -Value "USERNAME=kavishka"
+          Add-Content -Path "rdp-info.txt" -Value "PORT=3389"
+          Add-Content -Path "rdp-info.txt" -Value "STARTED=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') UTC"
+          Add-Content -Path "rdp-info.txt" -Value "EXPIRES=$((Get-Date).AddHours(5).ToString('yyyy-MM-dd HH:mm:ss')) UTC"
 
       # ─────────────────────────────────────────
       # PUSH RDP INFO
