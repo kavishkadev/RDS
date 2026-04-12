@@ -243,49 +243,36 @@ jobs:
           Add-Content -Path "rdp-info.txt" -Value "3. RDP: mstsc -> $tsIP -> kavishka"
 
       # ─────────────────────────────────────────
-      # GET OAUTH TOKEN (Option B)
+      # GET OAUTH TOKEN
       # ─────────────────────────────────────────
       - name: Get Tailscale OAuth Token
-        shell: powershell
+        shell: bash
         id: oauth
         run: |
-          Write-Host "Obtaining OAuth token..."
+          echo "Obtaining OAuth token..."
           
-          $clientId = "${{ secrets.TS_CLIENT_ID }}"
-          $clientSecret = "${{ secrets.TS_CLIENT_SECRET }}"
+          CLIENT_ID="${{ secrets.TS_CLIENT_ID }}"
+          CLIENT_SECRET="${{ secrets.TS_CLIENT_SECRET }}"
           
-          if ([string]::IsNullOrEmpty($clientId) -or [string]::IsNullOrEmpty($clientSecret)) {
-            Write-Host "Warning: TS_CLIENT_ID or TS_CLIENT_SECRET not set. Skipping auto-approve."
-            echo "oauth_token=" >> $env:GITHUB_OUTPUT
+          if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
+            echo "Warning: TS_CLIENT_ID or TS_CLIENT_SECRET not set. Skipping auto-approve."
+            echo "oauth_token=" >> $GITHUB_OUTPUT
             exit 0
-          }
+          fi
           
-          try {
-            $base64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$clientId:$clientSecret"))
-            
-            $headers = @{
-                "Authorization" = "Basic $base64"
-                "Content-Type" = "application/x-www-form-urlencoded"
-            }
-            
-            $body = "grant_type=client_credentials&scope=device"
-            
-            $response = Invoke-RestMethod `
-                -Uri "https://login.tailscale.com/api/v2/oauth/token" `
-                -Headers $headers `
-                -Method POST `
-                -Body $body
-            
-            $token = $response.access_token
-            echo "oauth_token=$token" >> $env:GITHUB_OUTPUT
-            Write-Host "OAuth token obtained successfully!"
-          }
-          catch {
-            Write-Host "Warning: Failed to obtain OAuth token."
-            Write-Host "Error: $($_.Exception.Message)"
-            echo "oauth_token=" >> $env:GITHUB_OUTPUT
-          }
-
+          # Get OAuth token using curl
+          TOKEN=$(curl -s -X POST "https://login.tailscale.com/api/v2/oauth/token" \
+            -u "$CLIENT_ID:$CLIENT_SECRET" \
+            -d "grant_type=client_credentials&scope=device" | \
+            grep -o '"access_token":"[^"]*' | cut -d'"' -f4)
+          
+          if [ -n "$TOKEN" ]; then
+            echo "oauth_token=$TOKEN" >> $GITHUB_OUTPUT
+            echo "OAuth token obtained successfully!"
+          else
+            echo "Warning: Failed to obtain OAuth token"
+            echo "oauth_token=" >> $GITHUB_OUTPUT
+          fi
       # ─────────────────────────────────────────
       # APPROVE EXIT NODE
       # ─────────────────────────────────────────
