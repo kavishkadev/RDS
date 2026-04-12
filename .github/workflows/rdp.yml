@@ -27,8 +27,12 @@ jobs:
           sudo sysctl -w net.core.rmem_max=134217728
           sudo sysctl -w net.core.wmem_max=134217728
 
-          # Create 4GB swap for extra memory
-          sudo fallocate -l 4G /swapfile
+          # Remove existing swap first
+          sudo swapoff -a
+          sudo rm -f /swapfile
+
+          # Create fresh 4GB swap
+          sudo dd if=/dev/zero of=/swapfile bs=1M count=4096 status=progress
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
