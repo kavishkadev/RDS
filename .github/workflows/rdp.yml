@@ -134,36 +134,34 @@ jobs:
       # CREATE SHARED FOLDER
       # ─────────────────────────────────────────
       - name: Create shared folder
-        shell: powershell
+        shell: cmd
         run: |
-          Write-Host "Creating shared folder for file transfer..."
+          echo Creating shared folder for file transfer...
           
-          # Create folder
-          New-Item -ItemType Directory -Force -Path "C:\Transfer" | Out-Null
+          :: Create folder
+          if not exist C:\Transfer mkdir C:\Transfer
           
-          # Remove existing share if exists (suppress error if not found)
-          net share Transfer /delete 2>&1 | Out-Null
+          :: Delete share if exists (ignore errors)
+          net share Transfer /delete >nul 2>&1 || echo Share did not exist, continuing...
           
-          # Share using net share
-          $shareResult = net share Transfer=C:\Transfer /GRANT:Everyone,FULL 2>&1
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "Share created successfully"
-          } else {
-            Write-Host "Warning: Share creation had issues: $shareResult"
-          }
+          :: Create new share
+          net share Transfer=C:\Transfer /GRANT:Everyone,FULL
+          if %errorlevel% neq 0 (
+            echo ERROR: Failed to create share
+            exit /b 1
+          )
           
-          # Set NTFS permissions
-          icacls "C:\Transfer" /grant "Everyone:(OI)(CI)F" /T 2>&1 | Out-Null
+          :: Set permissions
+          icacls C:\Transfer /grant Everyone:(OI)(CI)F /T >nul 2>&1
           
-          # Allow SMB through firewall
-          netsh advfirewall firewall add rule name="Allow SMB Tailscale" `
-            dir=in action=allow protocol=TCP localport=445 remoteip=100.64.0.0/10 2>&1 | Out-Null
+          :: Allow SMB firewall
+          netsh advfirewall firewall add rule name="Allow SMB Tailscale" dir=in action=allow protocol=TCP localport=445 remoteip=100.64.0.0/10 >nul 2>&1
           
-          # Verify share
-          Write-Host "Shared folders:"
-          net share
-          
-          Write-Host "✅ Shared folder ready: \\TAILSCALE_IP\Transfer"
+          echo.
+          echo === Share Created Successfully ===
+          net share Transfer
+          echo ==================================
+
 
       # ─────────────────────────────────────────
       # INSTALL TAILSCALE
