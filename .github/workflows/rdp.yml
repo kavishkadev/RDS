@@ -52,21 +52,21 @@ jobs:
       # ─────────────────────────────────────────
       - name: 👤 Create RDP user
         run: |
-          sudo useradd -m -s /bin/bash rdpuser
-          echo "rdpuser:${{ secrets.RDP_PASSWORD }}" | sudo chpasswd
-          sudo usermod -aG sudo rdpuser
-          sudo usermod -aG audio,video rdpuser
+          sudo useradd -m -s /bin/bash kavishka
+          echo "kavishka:${{ secrets.RDP_PASSWORD }}" | sudo chpasswd
+          sudo usermod -aG sudo kavishka
+          sudo usermod -aG audio,video kavishka
 
       # ─────────────────────────────────────────
       # RESTORE BACKUP
       # ─────────────────────────────────────────
       - name: 💾 Restore previous session data
         run: |
-          if [ -f "backup/rdpuser-backup.tar.gz" ]; then
+          if [ -f "backup/kavishka-backup.tar.gz" ]; then
             echo "✅ Backup found! Restoring..."
-            sudo tar -xzf backup/rdpuser-backup.tar.gz -C /home/rdpuser/
-            sudo chown -R rdpuser:rdpuser /home/rdpuser/
-            echo "✅ Restore complete! Size: $(du -sh /home/rdpuser | cut -f1)"
+            sudo tar -xzf backup/kavishka-backup.tar.gz -C /home/kavishka/
+            sudo chown -R kavishka:kavishka /home/kavishka/
+            echo "✅ Restore complete! Size: $(du -sh /home/kavishka | cut -f1)"
           else
             echo "⚠️ No backup found. Starting fresh."
           fi
@@ -98,6 +98,7 @@ jobs:
             nodejs \
             npm \
             fonts-noto \
+            openssh-client \
             --no-install-recommends
           echo "✅ All packages installed!"
 
@@ -110,116 +111,90 @@ jobs:
           sudo pkill -9 xrdp-sesman || true
           sleep 2
           
-          sudo apt install -y xrdp xorgxrdp
-          sudo adduser xrdp ssl-cert || true
-          sudo xrdp-keygen xrdp /etc/xrdp/key.pem /etc/xrdp/cert.pem || true
-          
-          sudo sed -i 's/3389/3389/g' /etc/xrdp/xrdp.ini
-          sudo sed -i 's/security_layer=rdp/security_layer=rdp/g' /etc/xrdp/xrdp.ini
-          sudo sed -i 's/max_bpp=32/max_bpp=24/g' /etc/xrdp/xrdp.ini
-          sudo sed -i 's/crypt_level=low/crypt_level=high/g' /etc/xrdp/xrdp.ini
-          sudo sed -i 's/ListenAddress=127.0.0.1/ListenAddress=0.0.0.0/g' /etc/xrdp/sesman.ini
-          
-          echo "xfce4-session" | sudo tee /home/rdpuser/.xsession > /dev/null
-          sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
-          sudo chmod 644 /home/rdpuser/.xsession
+          echo "xfce4-session" | sudo tee /home/kavishka/.xsession > /dev/null
+          sudo chown kavishka:kavishka /home/kavishka/.xsession
+          sudo chmod 644 /home/kavishka/.xsession
           
           sudo xrdp || true
           sudo xrdp-sesman || true
           
           sleep 3
           
-          echo "=== XRDP Process Check ==="
+          echo "=== XRDP Status ==="
           ps aux | grep xrdp | grep -v grep
-          
-          echo "=== Port Check ==="
           sudo ss -tlnp | grep 3389 || echo "⚠️ Port 3389 not found"
-          
-          echo "✅ XRDP configuration complete"
 
       # ─────────────────────────────────────────
-      # DYNAMIC DNS UPDATE (DUCKDNS)
+      # LOCALHOST.RUN TUNNEL (FREE SSH)
       # ─────────────────────────────────────────
-      - name: 🌐 Update DuckDNS with current IP
-        env:
-          DUCKDNS_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
-          DUCKDNS_DOMAIN: ${{ secrets.DUCKDNS_DOMAIN }}
+      - name: 🌐 Setup localhost.run SSH tunnel
         run: |
-          CURRENT_IP=$(curl -s https://api.ipify.org)
-          echo "📡 Current runner IP: $CURRENT_IP"
+          mkdir -p ~/.ssh
+          cat << 'EOF' > ~/.ssh/config
+          Host localhost.run
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            ServerAliveInterval 60
+            ServerAliveCountMax 3
+          EOF
+
+          echo "🚀 Starting SSH tunnel to localhost.run..."
+          # Run tunnel in background, capture output
+          ssh -R 0:localhost:3389 nokey@localhost.run > /tmp/tunnel.log 2>&1 &
           
-          RESPONSE=$(curl -s "https://www.duckdns.org/update?domains=$DUCKDNS_DOMAIN&token=$DUCKDNS_TOKEN&ip=$CURRENT_IP")
-          echo "🔄 DuckDNS response: $RESPONSE"
+          # Wait for tunnel to establish
+          echo "⏳ Waiting for tunnel connection..."
+          for i in {1..15}; do
+            sleep 3
+            if grep -qi "forwarding success\|localhost.run" /tmp/tunnel.log 2>/dev/null; then
+              echo "✅ Tunnel established!"
+              break
+            fi
+            echo "⏳ Attempt $i/15..."
+          done
           
-          if echo "$RESPONSE" | grep -q "OK"; then
-            echo "✅ DDNS updated: $DUCKDNS_DOMAIN.duckdns.org → $CURRENT_IP"
-          else
-            echo "⚠️ DDNS update may have failed. Response: $RESPONSE"
+          # Show full log for debugging
+          echo "=== Tunnel Log ==="
+          cat /tmp/tunnel.log
+          
+          # Extract hostname & port (format: http://xxxxx.localhost.run:port)
+          TUNNEL_LINE=$(grep -m1 "localhost.run" /tmp/tunnel.log || echo "")
+          TUNNEL_HOST=$(echo "$TUNNEL_LINE" | grep -oP '[a-z0-9-]+\.localhost\.run' | head -1)
+          TUNNEL_PORT=$(echo "$TUNNEL_LINE" | grep -oP ':(\d+)' | tail -1 | tr -d ':')
+          
+          if [ -z "$TUNNEL_HOST" ]; then
+            echo "⚠️ Could not auto-parse tunnel address. Check logs above."
+            TUNNEL_HOST="check-logs.localhost.run"
+            TUNNEL_PORT="3389"
           fi
-
-      # ─────────────────────────────────────────
-      # XFCE PERFORMANCE TWEAKS (FIXED INDENTATION)
-      # ─────────────────────────────────────────
-      - name: 🎨 Optimize XFCE
-        run: |
-          sudo -u rdpuser mkdir -p /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml
-
-          cat << 'XFWM4_EOF' | sudo tee /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml > /dev/null
-          <?xml version="1.0" encoding="UTF-8"?>
-          <channel name="xfwm4" version="1.0">
-            <property name="general" type="empty">
-              <property name="use_compositing" type="bool" value="false"/>
-              <property name="frame_opacity" type="int" value="100"/>
-              <property name="shadow_opacity" type="int" value="0"/>
-              <property name="show_frame_shadow" type="bool" value="false"/>
-              <property name="show_popup_shadow" type="bool" value="false"/>
-              <property name="vblank_mode" type="string" value="off"/>
-            </property>
-          </channel>
-          XFWM4_EOF
-
-          cat << 'XSETTINGS_EOF' | sudo tee /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml > /dev/null
-          <?xml version="1.0" encoding="UTF-8"?>
-          <channel name="xsettings" version="1.0">
-            <property name="Net" type="empty">
-              <property name="ThemeName" type="string" value="Greybird"/>
-              <property name="IconThemeName" type="string" value="elementary-xfce"/>
-            </property>
-            <property name="Gtk" type="empty">
-              <property name="EnableAnimations" type="bool" value="false"/>
-              <property name="CursorThemeSize" type="int" value="16"/>
-            </property>
-          </channel>
-          XSETTINGS_EOF
-
-          sudo chown -R rdpuser:rdpuser /home/rdpuser/.config
-          echo "✅ XFCE optimized!"
+          
+          echo "TUNNEL_HOST=$TUNNEL_HOST" >> $GITHUB_ENV
+          echo "TUNNEL_PORT=$TUNNEL_PORT" >> $GITHUB_ENV
+          echo "✅ Ready to connect: $TUNNEL_HOST:$TUNNEL_PORT"
 
       # ─────────────────────────────────────────
       # SHOW CONNECTION INFO
       # ─────────────────────────────────────────
       - name: 📋 Connection Info
-        env:
-          DUCKDNS_DOMAIN: ${{ secrets.DUCKDNS_DOMAIN }}
         run: |
-          CURRENT_IP=$(curl -s https://api.ipify.org)
           echo "========================================"
           echo "  🖥️  RDP CONNECTION DETAILS"
           echo "========================================"
-          echo "  🌐 DDNS HOST : ${DUCKDNS_DOMAIN}.duckdns.org"
-          echo "  📡 CURRENT IP: $CURRENT_IP"
-          echo "  👤 USERNAME  : rdpuser"
-          echo "  🔑 PASSWORD  : (from secrets.RDP_PASSWORD)"
-          echo "  🔌 PORT      : 3389"
+          echo "  🌐 SERVER    : ${{ env.TUNNEL_HOST }}"
+          echo "  🔌 PORT      : ${{ env.TUNNEL_PORT }}"
+          echo "  👤 USERNAME  : kavishka"
+          echo "  🔑 PASSWORD  : ${{ secrets.RDP_PASSWORD }}"
           echo "========================================"
-          echo "  ⚠️ Wait 1-2 min for DNS propagation"
+          echo "  💡 Windows:"
+          echo "     Win+R → mstsc"
+          echo "     Computer: ${{ env.TUNNEL_HOST }}:${{ env.TUNNEL_PORT }}"
+          echo ""
+          echo "  💡 Linux:"
+          echo "     xfreerdp /v:${{ env.TUNNEL_HOST }}:${{ env.TUNNEL_PORT }} /u:kavishka /p:${{ secrets.RDP_PASSWORD }}"
           echo "========================================"
-          echo "  💡 Windows: mstsc → ${DUCKDNS_DOMAIN}.duckdns.org:3389"
-          echo "  💡 Linux: xfreerdp /v:${DUCKDNS_DOMAIN}.duckdns.org:3389 /u:rdpuser"
-          echo "========================================"
-          echo "  XRDP : $(sudo systemctl is-active xrdp || echo 'manual')"
-          echo "  RAM  : $(free -h | grep Mem | awk '{print $3"/"$2}')"
-          echo "  CPU  : $(nproc) cores"
+          echo "  XRDP: $(pgrep -x xrdp > /dev/null && echo '✅ Running' || echo '❌ Stopped')"
+          echo "  RAM: $(free -h | grep Mem | awk '{print $3"/"$2}')"
+          echo "  CPU: $(nproc) cores"
           echo "========================================"
 
       # ─────────────────────────────────────────
@@ -236,8 +211,8 @@ jobs:
           echo "💾 Starting backup..."
           mkdir -p backup
 
-          sudo tar -czf backup/rdpuser-backup.tar.gz \
-            -C /home/rdpuser . \
+          sudo tar -czf backup/kavishka-backup.tar.gz \
+            -C /home/kavishka . \
             --exclude='.cache' \
             --exclude='.mozilla/firefox/*/cache2' \
             --exclude='.config/google-chrome/Default/Cache' \
@@ -248,12 +223,12 @@ jobs:
             --exclude='.npm' \
             2>/dev/null
 
-          BACKUP_SIZE=$(du -sh backup/rdpuser-backup.tar.gz | cut -f1)
+          BACKUP_SIZE=$(du -sh backup/kavishka-backup.tar.gz | cut -f1)
           echo "✅ Backup complete! Size: $BACKUP_SIZE"
 
       - name: 📤 Push backup to GitHub
         run: |
-          git add backup/rdpuser-backup.tar.gz
+          git add backup/kavishka-backup.tar.gz
           if git diff --staged --quiet; then
             echo "⚠️ No changes to backup."
           else
