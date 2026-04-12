@@ -98,7 +98,6 @@ jobs:
             nodejs \
             npm \
             fonts-noto \
-            openssh-client \
             --no-install-recommends
           echo "✅ All packages installed!"
 
@@ -125,64 +124,41 @@ jobs:
           sudo ss -tlnp | grep 3389 || echo "⚠️ Port 3389 not found"
 
       # ─────────────────────────────────────────
-      # LOCALHOST.RUN TUNNEL
+      # TCP TUNNEL (BORE - FREE)
       # ─────────────────────────────────────────
-      - name: 🌐 Setup localhost.run SSH tunnel
+      - name: 🌐 Setup TCP Tunnel (bore)
         run: |
-          mkdir -p ~/.ssh
-          cat << 'EOF' > ~/.ssh/config
-          Host localhost.run
-            StrictHostKeyChecking no
-            UserKnownHostsFile /dev/null
-            ServerAliveInterval 60
-            ServerAliveCountMax 3
-          EOF
+          # Install bore (lightweight TCP tunnel)
+          curl -LO https://github.com/ekzhang/bore/releases/latest/download/bore-x86_64-unknown-linux-musl.tar.gz
+          tar -xzf bore-x86_64-unknown-linux-musl.tar.gz
+          sudo mv bore /usr/local/bin/
+          chmod +x /usr/local/bin/bore
 
-          echo "🚀 Starting SSH tunnel..."
-          ssh -R 0:localhost:3389 nokey@localhost.run > /tmp/tunnel.log 2>&1 &
-          
-          sleep 10
-          
+          echo "🚀 Starting TCP tunnel to bore.pub..."
+          bore local 3389 --to bore.pub > /tmp/bore.log 2>&1 &
+
+          sleep 8
+
           echo "========================================"
-          echo "  📜 RAW LOG OUTPUT"
+          echo "  📜 TUNNEL LOG OUTPUT"
           echo "========================================"
-          cat /tmp/tunnel.log
+          cat /tmp/bore.log
           echo "========================================"
+
+          # Extract address (format: bore.pub:PORT)
+          TUNNEL_ADDR=$(grep -oP 'listening on \K[^\s]+' /tmp/bore.log | head -1)
           
-          # Try multiple patterns to extract port
-          TUNNEL_PORT=""
-          
-          # Pattern 1: "Forwarding from 0.0.0.0:12345"
-          if [ -z "$TUNNEL_PORT" ]; then
-            TUNNEL_PORT=$(grep -oP '0\.0\.0\.0:\K\d+' /tmp/tunnel.log | head -1)
+          if [ -z "$TUNNEL_ADDR" ]; then
+            TUNNEL_ADDR=$(grep -oP 'bore\.pub:\K\d+' /tmp/bore.log | head -1)
+            if [ -n "$TUNNEL_ADDR" ]; then
+              TUNNEL_ADDR="bore.pub:$TUNNEL_ADDR"
+            else
+              TUNNEL_ADDR="CHECK_LOGS"
+            fi
           fi
-          
-          # Pattern 2: "port 12345"
-          if [ -z "$TUNNEL_PORT" ]; then
-            TUNNEL_PORT=$(grep -oP 'port \K\d+' /tmp/tunnel.log | head -1)
-          fi
-          
-          # Pattern 3: ":(\d+)" (any port number after colon)
-          if [ -z "$TUNNEL_PORT" ]; then
-            TUNNEL_PORT=$(grep -oP ':\K\d{4,5}' /tmp/tunnel.log | head -1)
-          fi
-          
-          if [ -n "$TUNNEL_PORT" ]; then
-            echo "✅ Extracted Port: $TUNNEL_PORT"
-            echo "TUNNEL_ADDR=localhost.run" >> $GITHUB_ENV
-            echo "TUNNEL_PORT=$TUNNEL_PORT" >> $GITHUB_ENV
-          else
-            echo "❌ Could not auto-extract port."
-            echo "💡 Manual extraction needed - check RAW LOG OUTPUT above"
-            echo "TUNNEL_ADDR=MANUAL_CHECK" >> $GITHUB_ENV
-            echo "TUNNEL_PORT=SEE_LOGS" >> $GITHUB_ENV
-          fi
-          
-          if pgrep -f "nokey@localhost.run" > /dev/null; then
-            echo "✅ SSH Tunnel Process is active."
-          else
-            echo "❌ SSH Tunnel Process died!"
-          fi
+
+          echo "TUNNEL_ADDR=$TUNNEL_ADDR" >> $GITHUB_ENV
+          echo "✅ Tunnel ready: $TUNNEL_ADDR"
 
       # ─────────────────────────────────────────
       # SHOW CONNECTION INFO
@@ -193,18 +169,19 @@ jobs:
           echo "  🖥️  RDP CONNECTION DETAILS"
           echo "========================================"
           echo "  🌐 SERVER    : ${{ env.TUNNEL_ADDR }}"
-          echo "  🔌 PORT      : ${{ env.TUNNEL_PORT }}"
+          echo "  🔌 PORT      : (included in server address)"
           echo "  👤 USERNAME  : kavishka"
           echo "  🔑 PASSWORD  : (from secrets)"
           echo "========================================"
           echo "  💡 Windows:"
           echo "     Win+R → mstsc"
-          echo "     Computer: ${{ env.TUNNEL_ADDR }}:${{ env.TUNNEL_PORT }}"
+          echo "     Computer: ${{ env.TUNNEL_ADDR }}"
           echo ""
           echo "  💡 Linux:"
-          echo "     xfreerdp /v:${{ env.TUNNEL_ADDR }}:${{ env.TUNNEL_PORT }} /u:kavishka"
+          echo "     xfreerdp /v:${{ env.TUNNEL_ADDR }} /u:kavishka"
           echo "========================================"
           echo "  ⚠️ Username is 'kavishka' (case-sensitive)"
+          echo "  ⚠️ If connection fails, GitHub may block outbound TCP."
           echo "========================================"
           echo "  XRDP: $(pgrep -x xrdp > /dev/null && echo '✅ Running' || echo '❌ Stopped')"
           echo "  RAM: $(free -h | grep Mem | awk '{print $3"/"$2}')"
