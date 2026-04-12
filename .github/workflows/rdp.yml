@@ -12,14 +12,14 @@ jobs:
 
     steps:
       # ─────────────────────────────────────────
-      # SHOW SYSTEM INFO
+      # SYSTEM INFO
       # ─────────────────────────────────────────
       - name: System Info
         shell: powershell
         run: |
           Write-Host "========================================"
-          Write-Host "Windows Version:"
-          (Get-WmiObject Win32_OperatingSystem).Caption
+          $os = (Get-WmiObject Win32_OperatingSystem).Caption
+          Write-Host "Windows: $os"
           Write-Host "CPU Cores: $env:NUMBER_OF_PROCESSORS"
           $ram = [math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB, 2)
           Write-Host "RAM: $ram GB"
@@ -41,6 +41,42 @@ jobs:
           git config user.email "rdpbot@github.com"
 
       # ─────────────────────────────────────────
+      # CREATE USER KAVISHKA
+      # ─────────────────────────────────────────
+      - name: Create user kavishka
+        shell: powershell
+        run: |
+          $pass = "${{ secrets.RDP_PASSWORD }}"
+          $secPass = ConvertTo-SecureString $pass -AsPlainText -Force
+
+          # Check if user already exists
+          $userExists = Get-LocalUser -Name "kavishka" -ErrorAction SilentlyContinue
+
+          if ($userExists) {
+            Write-Host "User kavishka exists. Updating password..."
+            Set-LocalUser -Name "kavishka" -Password $secPass
+          } else {
+            Write-Host "Creating user kavishka..."
+            New-LocalUser -Name "kavishka" `
+              -Password $secPass `
+              -FullName "Kavishka" `
+              -Description "RDP User" `
+              -PasswordNeverExpires
+          }
+
+          # Add to Administrators and Remote Desktop Users groups
+          Add-LocalGroupMember -Group "Administrators" `
+            -Member "kavishka" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" `
+            -Member "kavishka" -ErrorAction SilentlyContinue
+
+          # Enable the account
+          Enable-LocalUser -Name "kavishka"
+
+          Write-Host "User kavishka ready!"
+          Write-Host "Groups: $(Get-LocalGroup | Where-Object { (Get-LocalGroupMember $_ -ErrorAction SilentlyContinue).Name -like '*kavishka*' } | Select-Object -ExpandProperty Name)"
+
+      # ─────────────────────────────────────────
       # RESTORE BACKUP
       # ─────────────────────────────────────────
       - name: Restore previous session data
@@ -48,8 +84,9 @@ jobs:
         run: |
           if (Test-Path "backup\userdata.zip") {
             Write-Host "Backup found! Restoring..."
+            New-Item -ItemType Directory -Force -Path "C:\Users\kavishka\" | Out-Null
             Expand-Archive -Path "backup\userdata.zip" `
-              -DestinationPath "C:\Users\runneradmin\" `
+              -DestinationPath "C:\Users\kavishka\" `
               -Force
             Write-Host "Restore complete!"
           } else {
@@ -57,19 +94,7 @@ jobs:
           }
 
       # ─────────────────────────────────────────
-      # SET RDP PASSWORD
-      # ─────────────────────────────────────────
-      - name: Set RDP credentials
-        shell: powershell
-        run: |
-          $password = "${{ secrets.RDP_PASSWORD }}"
-          net user runneradmin $password
-          Write-Host "Password set for runneradmin"
-          net user runneradmin /active:yes
-          Write-Host "Account enabled"
-
-      # ─────────────────────────────────────────
-      # ENABLE & CONFIGURE RDP
+      # ENABLE RDP
       # ─────────────────────────────────────────
       - name: Enable RDP
         shell: powershell
@@ -77,23 +102,31 @@ jobs:
           # Enable Remote Desktop
           Set-ItemProperty -Path `
             'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -name "fDenyTSConnections" -Value 0
+            -Name "fDenyTSConnections" -Value 0
 
-          # Enable RDP through firewall
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-
-          # Allow RDP without Network Level Authentication
+          # Disable NLA (Network Level Authentication)
+          # This makes connecting easier without certificate issues
           Set-ItemProperty -Path `
             'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -name "UserAuthentication" -Value 0
+            -Name "UserAuthentication" -Value 0
 
-          # Enable Remote Desktop service
+          Set-ItemProperty -Path `
+            'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "SecurityLayer" -Value 0
+
+          # Enable RDP firewall rules
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          # Start RDP service
           Set-Service -Name TermService -StartupType Automatic
           Start-Service -Name TermService
 
+          # Allow kavishka user through local policy
+          $sid = (Get-LocalUser -Name "kavishka").SID.Value
+          Write-Host "kavishka SID: $sid"
+
           Write-Host "RDP Enabled!"
-          $svc = (Get-Service TermService).Status
-          Write-Host "RDP Service: $svc"
+          Write-Host "RDP Service: $((Get-Service TermService).Status)"
 
       # ─────────────────────────────────────────
       # INSTALL TAILSCALE
@@ -103,29 +136,35 @@ jobs:
         run: |
           Write-Host "Downloading Tailscale..."
 
-          # Use direct MSI/exe download with correct URL
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
-          $out = "$env:TEMP\tailscale-setup.exe"
-
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
 
-          Write-Host "Installing Tailscale silently..."
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
+          $out = Join-Path $env:TEMP "tailscale-setup.exe"
+
+          Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+          Write-Host "Download complete. Installing..."
+
           $proc = Start-Process -FilePath $out `
             -ArgumentList "/S" `
             -Wait -PassThru -NoNewWindow
 
-          Write-Host "Exit code: $($proc.ExitCode)"
+          Write-Host "Installer exit code: $($proc.ExitCode)"
+          Start-Sleep -Seconds 15
 
-          # Wait for service to start
-          Start-Sleep -Seconds 10
-
-          # Verify install
-          if (Test-Path "C:\Program Files\Tailscale\tailscale.exe") {
-            Write-Host "Tailscale installed successfully!"
+          # Verify
+          $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
+          if (Test-Path $tsPath) {
+            Write-Host "Tailscale installed OK at $tsPath"
           } else {
-            Write-Host "Tailscale binary not found, trying alternative path..."
-            Get-ChildItem "C:\Program Files\" | Where-Object { $_.Name -like "*tail*" }
+            Write-Host "Searching for tailscale..."
+            $found = Get-ChildItem -Path "C:\Program Files\" `
+              -Recurse -Filter "tailscale.exe" -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if ($found) {
+              Write-Host "Found at: $($found.FullName)"
+            } else {
+              Write-Host "ERROR: tailscale.exe not found!"
+            }
           }
 
       # ─────────────────────────────────────────
@@ -134,44 +173,40 @@ jobs:
       - name: Connect Tailscale
         shell: powershell
         run: |
-          $tsKey = "${{ secrets.TS_AUTHKEY }}"
-
           # Find tailscale exe
           $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
           if (-not (Test-Path $tsExe)) {
-            $tsExe = (Get-ChildItem -Path "C:\Program Files\" `
-              -Recurse -Filter "tailscale.exe" `
-              -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+            $tsExe = (Get-ChildItem -Path "C:\" -Recurse `
+              -Filter "tailscale.exe" `
+              -ErrorAction SilentlyContinue |
+              Select-Object -First 1).FullName
           }
+          Write-Host "Tailscale path: $tsExe"
 
-          Write-Host "Using tailscale at: $tsExe"
-
-          # Connect to Tailscale
+          # Connect
+          $tsKey = "${{ secrets.TS_AUTHKEY }}"
           & $tsExe up --authkey=$tsKey --hostname="github-rdp" --accept-routes
-
           Start-Sleep -Seconds 15
 
           # Get IP
-          $tsIP = & $tsExe ip -4
+          $tsIP = (& $tsExe ip -4).Trim()
           Write-Host "========================================"
           Write-Host "Tailscale Connected!"
           Write-Host "YOUR FIXED RDP IP: $tsIP"
-          Write-Host "USERNAME: runneradmin"
+          Write-Host "USERNAME: kavishka"
           Write-Host "PASSWORD: your RDP_PASSWORD secret"
           Write-Host "Open mstsc -> Computer: $tsIP"
           Write-Host "========================================"
 
-          # Save to file
-          Set-Content -Path "rdp-info.txt" -Value "RDP_IP=$tsIP"
-          Add-Content -Path "rdp-info.txt" -Value "USERNAME=runneradmin"
-          Add-Content -Path "rdp-info.txt" -Value "PORT=3389"
-          $started = Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC"
-          Add-Content -Path "rdp-info.txt" -Value "STARTED=$started"
-          $expires = (Get-Date).AddHours(5).ToString("yyyy-MM-dd HH:mm:ss UTC")
-          Add-Content -Path "rdp-info.txt" -Value "EXPIRES=$expires"
+          # Save info
+          Set-Content  -Path "rdp-info.txt" -Value "RDP_IP=$tsIP"
+          Add-Content  -Path "rdp-info.txt" -Value "USERNAME=kavishka"
+          Add-Content  -Path "rdp-info.txt" -Value "PORT=3389"
+          Add-Content  -Path "rdp-info.txt" -Value "STARTED=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') UTC"
+          Add-Content  -Path "rdp-info.txt" -Value "EXPIRES=$((Get-Date).AddHours(5).ToString('yyyy-MM-dd HH:mm:ss')) UTC"
 
       # ─────────────────────────────────────────
-      # PUSH RDP INFO TO REPO
+      # PUSH RDP INFO
       # ─────────────────────────────────────────
       - name: Push RDP info to repo
         shell: bash
@@ -181,35 +216,31 @@ jobs:
           git push origin HEAD || true
 
       # ─────────────────────────────────────────
-      # SHOW CONNECTION DETAILS
+      # CONNECTION DETAILS
       # ─────────────────────────────────────────
       - name: Connection Details
         shell: powershell
         run: |
           $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
-          $tsIP = & $tsExe ip -4
-          $ram = [math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB,2)
-          $disk = [math]::Round((Get-PSDrive C).Free/1GB,2)
+          $tsIP  = (& $tsExe ip -4).Trim()
+          $ram   = [math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB, 2)
+          $disk  = [math]::Round((Get-PSDrive C).Free/1GB, 2)
 
           Write-Host "========================================"
-          Write-Host "  WINDOWS RDP CONNECTION DETAILS"
+          Write-Host "  WINDOWS RDP - READY TO CONNECT"
           Write-Host "========================================"
           Write-Host "  IP       : $tsIP"
-          Write-Host "  USERNAME : runneradmin"
+          Write-Host "  USERNAME : kavishka"
           Write-Host "  PASSWORD : your RDP_PASSWORD secret"
           Write-Host "  PORT     : 3389"
           Write-Host "========================================"
           Write-Host "  HOW TO CONNECT:"
-          Write-Host "  1. Run Tailscale on your Windows PC"
-          Write-Host "  2. Login with same Tailscale account"
+          Write-Host "  1. Install Tailscale on your PC"
+          Write-Host "  2. Login with SAME Tailscale account"
           Write-Host "  3. Win+R -> mstsc -> Enter"
           Write-Host "  4. Computer: $tsIP"
-          Write-Host "  5. Username: runneradmin"
+          Write-Host "  5. Username: kavishka"
           Write-Host "  6. Password: your RDP_PASSWORD"
-          Write-Host "========================================"
-          Write-Host "  IP is FIXED - same every restart!"
-          Write-Host "  Session auto-restarts every 5 hours"
-          Write-Host "  Files backed up on each restart"
           Write-Host "========================================"
           Write-Host "  RAM  : $ram GB"
           Write-Host "  CPU  : $env:NUMBER_OF_PROCESSORS cores"
@@ -217,14 +248,14 @@ jobs:
           Write-Host "========================================"
 
       # ─────────────────────────────────────────
-      # SESSION (4h 30min)
+      # SESSION 4h 30min
       # ─────────────────────────────────────────
       - name: Active session 4h 30min
         shell: powershell
         run: Start-Sleep -Seconds 16200
 
       # ─────────────────────────────────────────
-      # BACKUP TO REPO
+      # BACKUP
       # ─────────────────────────────────────────
       - name: Backup user data
         shell: powershell
@@ -233,23 +264,20 @@ jobs:
           New-Item -ItemType Directory -Force -Path "backup" | Out-Null
 
           $items = @(
-            "C:\Users\runneradmin\Desktop",
-            "C:\Users\runneradmin\Documents",
-            "C:\Users\runneradmin\Downloads"
+            "C:\Users\kavishka\Desktop",
+            "C:\Users\kavishka\Documents",
+            "C:\Users\kavishka\Downloads"
           )
 
           $existing = $items | Where-Object { Test-Path $_ }
 
           if ($existing.Count -gt 0) {
             Compress-Archive -Path $existing `
-              -DestinationPath "backup\userdata.zip" `
-              -Force
-            $size = [math]::Round(
-              (Get-Item "backup\userdata.zip").Length/1MB, 2
-            )
+              -DestinationPath "backup\userdata.zip" -Force
+            $size = [math]::Round((Get-Item "backup\userdata.zip").Length/1MB, 2)
             Write-Host "Backup complete! Size: $size MB"
           } else {
-            Write-Host "No user data to backup."
+            Write-Host "No user data to backup yet."
           }
 
       - name: Push backup to GitHub
@@ -270,4 +298,4 @@ jobs:
         run: |
           gh workflow run rdp.yml
           echo "Next session triggered!"
-          echo "Windows RDP ready again in ~3 minutes!"
+          echo "Windows RDP ready again in about 3 minutes!"
