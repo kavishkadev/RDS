@@ -90,13 +90,13 @@ jobs:
 
           # Create proper .xsession (THIS FIXES YOUR ERROR)
           cat << 'EOF' | sudo tee /home/kavishka/.xsession > /dev/null
-#!/bin/sh
-export XDG_CONFIG_DIRS=/etc/xdg:/usr/local/etc/xdg
-export XDG_DATA_DIRS=/usr/local/share:/usr/share:/var/lib/snapd/desktop
-unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
-exec startxfce4
-EOF
+          #!/bin/sh
+          export XDG_CONFIG_DIRS=/etc/xdg:/usr/local/etc/xdg
+          export XDG_DATA_DIRS=/usr/local/share:/usr/share:/var/lib/snapd/desktop
+          unset SESSION_MANAGER
+          unset DBUS_SESSION_BUS_ADDRESS
+          exec startxfce4
+          EOF
           sudo chown kavishka:kavishka /home/kavishka/.xsession
           sudo chmod 755 /home/kavishka/.xsession
 
