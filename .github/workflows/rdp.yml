@@ -116,7 +116,7 @@ jobs:
       - name: 🚀 Configure XRDP (high performance)
         run: |
           # XRDP main config
-          sudo tee /etc/xrdp/xrdp.ini > /dev/null <<EOF
+          sudo tee /etc/xrdp/xrdp.ini > /dev/null <<'EOF'
           [globals]
           ini_version=1
           fork=true
@@ -134,27 +134,35 @@ jobs:
           bitmap_cache=true
           bitmap_compression=true
           bulk_compression=true
-          max_bpp=32
+          max_bpp=24
           xserverbpp=24
           colordepth=24
           rem_con_timeout=10
+          
+          [xrdp1]
+          name=sesman-any
+          lib=libxup.so
+          username=ask
+          password=ask
+          ip=127.0.0.1
+          port=-1
           EOF
 
           # XRDP session config
-          sudo tee /etc/xrdp/sesman.ini > /dev/null <<EOF
+          sudo tee /etc/xrdp/sesman.ini > /dev/null <<'EOF'
           [Globals]
           ListenAddress=127.0.0.1
           ListenPort=3350
           EnableUserWindowManager=true
           UserWindowManager=startwm.sh
           DefaultWindowManager=startwm.sh
-
+          
           [Security]
           AllowRootLogin=false
           MaxLoginRetry=10
           TerminalServerUsers=rdpuser
           TerminalServerAdmins=rdpuser
-
+          
           [Sessions]
           MaxSessions=10
           KillDisconnected=false
@@ -166,18 +174,24 @@ jobs:
           sudo bash -c 'echo "startxfce4" > /etc/xrdp/startwm.sh'
           sudo chmod +x /etc/xrdp/startwm.sh
 
-          # Fix .xsession with sudo chmod
+          # Fix .xsession
           sudo bash -c 'echo "startxfce4" > /home/rdpuser/.xsession'
           sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
           sudo chmod +x /home/rdpuser/.xsession
 
-          # Fix XRDP colors & performance
-          sudo sed -i 's/max_bpp=32/max_bpp=24/g' /etc/xrdp/xrdp.ini
-
           sudo adduser xrdp ssl-cert
+
+          # Check config before starting
+          echo "--- xrdp.ini preview ---"
+          sudo head -5 /etc/xrdp/xrdp.ini
+
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
-          sleep 3
+          sleep 5
+
+          # Show status for debugging
+          sudo systemctl status xrdp --no-pager || \
+          sudo journalctl -xeu xrdp.service --no-pager | tail -20
           echo "✅ XRDP status: $(sudo systemctl is-active xrdp)"
 
       # ─────────────────────────────────────────
