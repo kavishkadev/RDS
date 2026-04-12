@@ -111,7 +111,7 @@ jobs:
           sudo pkill -9 xrdp-sesman || true
           sleep 2
           
-          echo "xfce4-session" | sudo tee /home/kavishka/.xsession > /dev/null
+          echo "startxfce4" | sudo tee /home/kavishka/.xsession > /dev/null
           sudo chown kavishka:kavishka /home/kavishka/.xsession
           sudo chmod 644 /home/kavishka/.xsession
           
@@ -125,7 +125,7 @@ jobs:
           sudo ss -tlnp | grep 3389 || echo "⚠️ Port 3389 not found"
 
       # ─────────────────────────────────────────
-      # LOCALHOST.RUN TUNNEL (FREE SSH)
+      # LOCALHOST.RUN TUNNEL
       # ─────────────────────────────────────────
       - name: 🌐 Setup localhost.run SSH tunnel
         run: |
@@ -138,39 +138,35 @@ jobs:
             ServerAliveCountMax 3
           EOF
 
-          echo "🚀 Starting SSH tunnel to localhost.run..."
-          # Run tunnel in background, capture output
+          echo "🚀 Starting SSH tunnel..."
           ssh -R 0:localhost:3389 nokey@localhost.run > /tmp/tunnel.log 2>&1 &
           
-          # Wait for tunnel to establish
-          echo "⏳ Waiting for tunnel connection..."
-          for i in {1..15}; do
-            sleep 3
-            if grep -qi "forwarding success\|localhost.run" /tmp/tunnel.log 2>/dev/null; then
-              echo "✅ Tunnel established!"
-              break
-            fi
-            echo "⏳ Attempt $i/15..."
-          done
+          sleep 10
           
-          # Show full log for debugging
-          echo "=== Tunnel Log ==="
+          echo "========================================"
+          echo "  📜 RAW LOG OUTPUT (IMPORTANT)"
+          echo "========================================"
           cat /tmp/tunnel.log
+          echo "========================================"
           
-          # Extract hostname & port (format: http://xxxxx.localhost.run:port)
-          TUNNEL_LINE=$(grep -m1 "localhost.run" /tmp/tunnel.log || echo "")
-          TUNNEL_HOST=$(echo "$TUNNEL_LINE" | grep -oP '[a-z0-9-]+\.localhost\.run' | head -1)
-          TUNNEL_PORT=$(echo "$TUNNEL_LINE" | grep -oP ':(\d+)' | tail -1 | tr -d ':')
+          # Extract Port
+          TUNNEL_PORT=$(grep -oP '0\.0\.0\.0[^\d]*\K\d+' /tmp/tunnel.log | tail -1)
           
-          if [ -z "$TUNNEL_HOST" ]; then
-            echo "⚠️ Could not auto-parse tunnel address. Check logs above."
-            TUNNEL_HOST="check-logs.localhost.run"
-            TUNNEL_PORT="3389"
+          if [ -n "$TUNNEL_PORT" ]; then
+            echo "✅ Extracted Port: $TUNNEL_PORT"
+            echo "TUNNEL_ADDR=localhost.run" >> $GITHUB_ENV
+            echo "TUNNEL_PORT=$TUNNEL_PORT" >> $GITHUB_ENV
+          else
+            echo "❌ Failed to extract port. Check logs above."
+            echo "TUNNEL_ADDR=CHECK_LOGS" >> $GITHUB_ENV
+            echo "TUNNEL_PORT=SEE_LOGS" >> $GITHUB_ENV
           fi
           
-          echo "TUNNEL_HOST=$TUNNEL_HOST" >> $GITHUB_ENV
-          echo "TUNNEL_PORT=$TUNNEL_PORT" >> $GITHUB_ENV
-          echo "✅ Ready to connect: $TUNNEL_HOST:$TUNNEL_PORT"
+          if pgrep -f "nokey@localhost.run" > /dev/null; then
+            echo "✅ SSH Tunnel Process is active."
+          else
+            echo "❌ SSH Tunnel Process died!"
+          fi
 
       # ─────────────────────────────────────────
       # SHOW CONNECTION INFO
@@ -180,17 +176,19 @@ jobs:
           echo "========================================"
           echo "  🖥️  RDP CONNECTION DETAILS"
           echo "========================================"
-          echo "  🌐 SERVER    : ${{ env.TUNNEL_HOST }}"
+          echo "  🌐 SERVER    : ${{ env.TUNNEL_ADDR }}"
           echo "  🔌 PORT      : ${{ env.TUNNEL_PORT }}"
           echo "  👤 USERNAME  : kavishka"
-          echo "  🔑 PASSWORD  : ${{ secrets.RDP_PASSWORD }}"
+          echo "  🔑 PASSWORD  : (from secrets)"
           echo "========================================"
           echo "  💡 Windows:"
           echo "     Win+R → mstsc"
-          echo "     Computer: ${{ env.TUNNEL_HOST }}:${{ env.TUNNEL_PORT }}"
+          echo "     Computer: ${{ env.TUNNEL_ADDR }}:${{ env.TUNNEL_PORT }}"
           echo ""
           echo "  💡 Linux:"
-          echo "     xfreerdp /v:${{ env.TUNNEL_HOST }}:${{ env.TUNNEL_PORT }} /u:kavishka /p:${{ secrets.RDP_PASSWORD }}"
+          echo "     xfreerdp /v:${{ env.TUNNEL_ADDR }}:${{ env.TUNNEL_PORT }} /u:kavishka"
+          echo "========================================"
+          echo "  ⚠️ Username is 'kavishka' (case-sensitive)"
           echo "========================================"
           echo "  XRDP: $(pgrep -x xrdp > /dev/null && echo '✅ Running' || echo '❌ Stopped')"
           echo "  RAM: $(free -h | grep Mem | awk '{print $3"/"$2}')"
@@ -215,7 +213,6 @@ jobs:
             -C /home/kavishka . \
             --exclude='.cache' \
             --exclude='.mozilla/firefox/*/cache2' \
-            --exclude='.config/google-chrome/Default/Cache' \
             --exclude='*.log' \
             --exclude='.local/share/recently-used.xbel' \
             --exclude='__pycache__' \
