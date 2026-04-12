@@ -144,21 +144,37 @@ jobs:
           sleep 10
           
           echo "========================================"
-          echo "  📜 RAW LOG OUTPUT (IMPORTANT)"
+          echo "  📜 RAW LOG OUTPUT"
           echo "========================================"
           cat /tmp/tunnel.log
           echo "========================================"
           
-          # Extract Port
-          TUNNEL_PORT=$(grep -oP '0\.0\.0\.0[^\d]*\K\d+' /tmp/tunnel.log | tail -1)
+          # Try multiple patterns to extract port
+          TUNNEL_PORT=""
+          
+          # Pattern 1: "Forwarding from 0.0.0.0:12345"
+          if [ -z "$TUNNEL_PORT" ]; then
+            TUNNEL_PORT=$(grep -oP '0\.0\.0\.0:\K\d+' /tmp/tunnel.log | head -1)
+          fi
+          
+          # Pattern 2: "port 12345"
+          if [ -z "$TUNNEL_PORT" ]; then
+            TUNNEL_PORT=$(grep -oP 'port \K\d+' /tmp/tunnel.log | head -1)
+          fi
+          
+          # Pattern 3: ":(\d+)" (any port number after colon)
+          if [ -z "$TUNNEL_PORT" ]; then
+            TUNNEL_PORT=$(grep -oP ':\K\d{4,5}' /tmp/tunnel.log | head -1)
+          fi
           
           if [ -n "$TUNNEL_PORT" ]; then
             echo "✅ Extracted Port: $TUNNEL_PORT"
             echo "TUNNEL_ADDR=localhost.run" >> $GITHUB_ENV
             echo "TUNNEL_PORT=$TUNNEL_PORT" >> $GITHUB_ENV
           else
-            echo "❌ Failed to extract port. Check logs above."
-            echo "TUNNEL_ADDR=CHECK_LOGS" >> $GITHUB_ENV
+            echo "❌ Could not auto-extract port."
+            echo "💡 Manual extraction needed - check RAW LOG OUTPUT above"
+            echo "TUNNEL_ADDR=MANUAL_CHECK" >> $GITHUB_ENV
             echo "TUNNEL_PORT=SEE_LOGS" >> $GITHUB_ENV
           fi
           
