@@ -1,4 +1,4 @@
-name: Kavishka
+name: Windows 11
 
 on:
   workflow_dispatch:
@@ -7,15 +7,26 @@ on:
 
 jobs:
   rdp:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 350
 
     steps:
-      - name: ⚡ Optimize system
+      # ─────────────────────────────────────────
+      # SHOW SYSTEM INFO
+      # ─────────────────────────────────────────
+      - name: 💻 System Info
         run: |
-          sudo systemctl disable --now apport unattended-upgrades apt-daily.timer apt-daily-upgrade.timer motd-news.timer 2>/dev/null || true
-          sudo swapoff -a || true
+          Write-Host "========================================"
+          Write-Host "  Windows Version:"
+          (Get-WmiObject Win32_OperatingSystem).Caption
+          Write-Host "  CPU Cores: $env:NUMBER_OF_PROCESSORS"
+          Write-Host "  RAM: $([math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB, 2)) GB"
+          Write-Host "========================================"
+        shell: powershell
 
+      # ─────────────────────────────────────────
+      # CHECKOUT REPO
+      # ─────────────────────────────────────────
       - name: 📦 Checkout repo
         uses: actions/checkout@v3
         with:
@@ -25,190 +36,214 @@ jobs:
       - name: 🔧 Configure Git
         run: |
           git config user.name "RDP Bot"
-          git config user.email "rdp@github.com"
+          git config user.email "rdpbot@github.com"
+        shell: bash
 
-      - name: 👤 Create RDP user
+      # ─────────────────────────────────────────
+      # RESTORE BACKUP
+      # ─────────────────────────────────────────
+      - name: 💾 Restore previous session data
         run: |
-          sudo useradd -m -s /bin/bash kavishka
-          echo "kavishka:${{ secrets.RDP_PASSWORD }}" | sudo chpasswd
-          sudo usermod -aG sudo kavishka
-          sudo usermod -aG audio,video,input kavishka
+          if (Test-Path "backup\userdata.zip") {
+            Write-Host "✅ Backup found! Restoring..."
+            Expand-Archive -Path "backup\userdata.zip" `
+              -DestinationPath "C:\Users\runneradmin\" `
+              -Force
+            Write-Host "✅ Restore complete!"
+          } else {
+            Write-Host "⚠️ No backup found. Starting fresh."
+          }
+        shell: powershell
 
-      - name: 💾 Restore backup
+      # ─────────────────────────────────────────
+      # SET RDP PASSWORD
+      # ─────────────────────────────────────────
+      - name: 🔐 Set RDP credentials
         run: |
-          if [ -f "backup/kavishka-backup.tar.gz" ]; then
-            sudo tar -xzf backup/kavishka-backup.tar.gz -C /home/kavishka/
-            sudo chown -R kavishka:kavishka /home/kavishka/
-          fi
+          # Set password for runneradmin (built-in admin account)
+          $password = "${{ secrets.RDP_PASSWORD }}"
+          net user runneradmin $password
+          Write-Host "✅ Password set for runneradmin"
+
+          # Make sure account is enabled
+          net user runneradmin /active:yes
+          Write-Host "✅ Account enabled"
+        shell: powershell
 
       # ─────────────────────────────────────────
-      # INSTALL DESKTOP (COMPLETE FIX)
+      # ENABLE & CONFIGURE RDP
       # ─────────────────────────────────────────
-      - name: 📥 Install XFCE + XRDP with all dependencies
+      - name: 🖥️ Enable RDP
         run: |
-          sudo apt update -qq
-          
-          # Install XFCE with ALL required components
-          sudo DEBIAN_FRONTEND=noninteractive apt install -y \
-            xfce4 \
-            xfce4-goodies \
-            xfce4-session \
-            xfce4-settings \
-            xfce4-panel \
-            xfce4-whiskermenu-plugin \
-            xfconf \
-            xrdp \
-            xorgxrdp \
-            dbus-x11 \
-            dbus \
-            pulseaudio \
-            gnome-keyring \
-            policykit-1 \
-            gvfs \
-            gvfs-backends \
-            gvfs-fuse \
-            light-locker \
-            firefox \
-            wget \
-            curl \
-            git \
-            htop \
-            neofetch \
-            unzip \
-            fonts-noto \
-            --no-install-recommends
-          
-          echo "✅ All packages installed!"
+          # Enable Remote Desktop
+          Set-ItemProperty -Path `
+            'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -name "fDenyTSConnections" -Value 0
+
+          # Enable RDP through firewall
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          # Allow RDP without Network Level Authentication
+          Set-ItemProperty -Path `
+            'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -name "UserAuthentication" -Value 0
+
+          # Enable Remote Desktop service
+          Set-Service -Name TermService -StartupType Automatic
+          Start-Service -Name TermService
+
+          Write-Host "✅ RDP Enabled!"
+          Write-Host "✅ RDP Service: $((Get-Service TermService).Status)"
+        shell: powershell
 
       # ─────────────────────────────────────────
-      # FIX XRDP SESSION (COMPLETE REWRITE)
+      # INSTALL TAILSCALE
       # ─────────────────────────────────────────
-      - name: 🚀 Fix XRDP Session (Complete Rewrite)
+      - name: 🌐 Install Tailscale
         run: |
-          # Kill any existing processes
-          sudo pkill -9 xrdp || true
-          sudo pkill -9 xrdp-sesman || true
-          sleep 2
-          
-          # ── FIX 1: Create proper .xsession ──
-          cat << 'EOF' | sudo tee /home/kavishka/.xsession > /dev/null
-          #!/bin/bash
-          # Export necessary environment variables
-          export XDG_CONFIG_DIRS=/etc/xdg:/usr/local/etc/xdg
-          export XDG_DATA_DIRS=/usr/local/share:/usr/share:/var/lib/snapd/desktop
-          export XDG_RUNTIME_DIR=/run/user/$(id -u)
-          export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus
-          export GTK_MODULES=gail:atk-bridge
-          export GTK_IM_MODULE=ibus
-          export QT_IM_MODULE=ibus
-          export XMODIFIERS=@im=ibus
-          
-          # Create runtime directory if it doesn't exist
-          mkdir -p $XDG_RUNTIME_DIR
-          chmod 700 $XDG_RUNTIME_DIR
-          
-          # Start D-Bus session
-          if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
-            eval $(dbus-launch --sh-syntax)
-          fi
-          
-          # Start GNOME keyring
-          eval $(gnome-keyring-daemon --start --components=gpg,pkcs11,secrets,ssh)
-          
-          # Unset session manager to prevent conflicts
-          unset SESSION_MANAGER
-          
-          # Start XFCE4 session
-          exec /usr/bin/xfce4-session
-          EOF
-          
-          sudo chown kavishka:kavishka /home/kavishka/.xsession
-          sudo chmod 755 /home/kavishka/.xsession
-          
-          # ── FIX 2: Configure XRDP properly ──
-          sudo sed -i 's/max_bpp=32/max_bpp=24/g' /etc/xrdp/xrdp.ini
-          sudo sed -i 's/crypt_level=low/crypt_level=high/g' /etc/xrdp/xrdp.ini
-          sudo sed -i 's/security_layer=rdp/security_layer=rdp/g' /etc/xrdp/xrdp.ini
-          
-          # ── FIX 3: Allow user to run XFCE ──
-          echo "allowed_users=anybody" | sudo tee /etc/X11/Xwrapper.config
-          
-          # ── FIX 4: Create D-Bus machine ID ──
-          sudo dbus-uuidgen --ensure=/etc/machine-id
-          
-          # ── FIX 5: Start XRDP with proper environment ──
-          sudo systemctl start dbus || true
-          
-          # Start xrdp-sesman first
-          sudo /usr/sbin/xrdp-sesman --daemon || true
-          sleep 2
-          
-          # Then start xrdp
-          sudo /usr/sbin/xrdp --nodaemon &
-          sleep 3
-          
-          # Verify
-          echo "=== Checking processes ==="
-          ps aux | grep -E "(xrdp|xfce|dbus)" | grep -v grep || echo "⚠️ Some processes may not show yet"
-          
-          echo "=== Checking port 3389 ==="
-          sudo ss -tlnp | grep 3389 || echo "⚠️ Port 3389 not listening yet"
-          
-          echo "✅ XRDP configuration complete!"
+          # Download Tailscale installer
+          Write-Host "📥 Downloading Tailscale..."
+          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" `
+            -OutFile "tailscale-setup.exe"
 
-      # ─────────────────────────────────────────
-      # SETUP TAILSCALE
-      # ─────────────────────────────────────────
-      - name: 🌐 Setup Tailscale
-        env:
-          TS_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          # Install silently
+          Write-Host "⚙️ Installing Tailscale..."
+          Start-Process -FilePath "tailscale-setup.exe" `
+            -ArgumentList "/S" `
+            -Wait -NoNewWindow
+
+          Write-Host "✅ Tailscale installed!"
+        shell: powershell
+
+      - name: 🔗 Connect Tailscale (fixed IP)
         run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey $TS_AUTH_KEY \
-            --accept-routes \
-            --hostname "ubuntu-rdp-fixed"
-          
-          TAILSCALE_IP=$(tailscale ip -4)
-          echo "TAILSCALE_IP=$TAILSCALE_IP" >> $GITHUB_ENV
-          
-          echo "✅ Tailscale IP: $TAILSCALE_IP"
+          # Start Tailscale with auth key
+          $tsKey = "${{ secrets.TS_AUTHKEY }}"
+
+          # Connect to Tailscale network
+          & "C:\Program Files\Tailscale\tailscale.exe" up `
+            --authkey=$tsKey `
+            --hostname="github-rdp" `
+            --accept-routes
+
+          Start-Sleep -Seconds 10
+
+          # Get Tailscale IP
+          $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+          Write-Host "========================================"
+          Write-Host "  ✅ Tailscale Connected!"
+          Write-Host "  🔗 YOUR FIXED RDP IP: $tsIP"
+          Write-Host "  👤 USERNAME: runneradmin"
+          Write-Host "  🔑 PASSWORD: (your RDP_PASSWORD secret)"
+          Write-Host "  🖥️  Open mstsc → Computer: $tsIP"
+          Write-Host "========================================"
+
+          # Save IP to file for reference
+          $tsIP | Out-File -FilePath "rdp-info.txt"
+          "USERNAME=runneradmin" | Add-Content "rdp-info.txt"
+          "STARTED=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')" | `
+            Add-Content "rdp-info.txt"
+          "EXPIRES=$(
+            (Get-Date).AddHours(5).ToString('yyyy-MM-dd HH:mm:ss UTC')
+          )" | Add-Content "rdp-info.txt"
+        shell: powershell
 
       # ─────────────────────────────────────────
-      # SHOW CONNECTION INFO
+      # PUSH RDP INFO TO REPO
       # ─────────────────────────────────────────
-      - name: 📋 Connection Info
+      - name: 📝 Push RDP info to repo
         run: |
-          echo "========================================"
-          echo "  🖥️  RDP CONNECTION DETAILS"
-          echo "========================================"
-          echo "  🌐 TAILSCALE IP: ${{ env.TAILSCALE_IP }}"
-          echo "  👤 USERNAME  : kavishka"
-          echo "  🔑 PASSWORD  : (from secrets)"
-          echo "  🔌 PORT      : 3389"
-          echo "========================================"
-          echo "  💡 HOW TO CONNECT:"
-          echo "  1. Install Tailscale on your device"
-          echo "  2. Sign in with same account"
-          echo "  3. Open Remote Desktop (mstsc)"
-          echo "  4. Connect to: ${{ env.TAILSCALE_IP }}"
-          echo "  5. Login: kavishka / your password"
-          echo "========================================"
-          echo "  ⏳ Session: 4h 30min | Auto-restart"
-          echo "========================================"
-
-      - name: ⏳ Keep alive (4h 30min)
-        run: sleep 16200
-
-      - name: 💾 Backup
-        run: |
-          mkdir -p backup
-          sudo tar -czf backup/kavishka-backup.tar.gz -C /home/kavishka . \
-            --exclude='.cache' --exclude='*.log' --exclude='__pycache__' 2>/dev/null
-          git add backup/
-          git commit -m "💾 Backup $(date +%Y-%m-%d)" || true
+          git add rdp-info.txt
+          git diff --staged --quiet || git commit -m "🔗 RDP IP - $(date)"
           git push origin HEAD || true
+        shell: bash
 
-      - name: 🔄 Trigger next
+      # ─────────────────────────────────────────
+      # SHOW FULL CONNECTION DETAILS
+      # ─────────────────────────────────────────
+      - name: 📋 Connection Details
+        run: |
+          $tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+          Write-Host "========================================"
+          Write-Host "  🖥️  WINDOWS 11 RDP DETAILS"
+          Write-Host "========================================"
+          Write-Host "  IP       : $tsIP"
+          Write-Host "  USERNAME : runneradmin"
+          Write-Host "  PASSWORD : (your RDP_PASSWORD secret)"
+          Write-Host "  PORT     : 3389"
+          Write-Host "========================================"
+          Write-Host "  HOW TO CONNECT:"
+          Write-Host "  1. Make sure Tailscale is running on YOUR PC"
+          Write-Host "  2. Win+R → type: mstsc → Enter"
+          Write-Host "  3. Computer: $tsIP"
+          Write-Host "  4. Username: runneradmin"
+          Write-Host "  5. Password: your RDP_PASSWORD"
+          Write-Host "========================================"
+          Write-Host "  ✅ IP is FIXED - same every restart!"
+          Write-Host "  ✅ Session auto-restarts every 5 hours"
+          Write-Host "  ✅ Files backed up on each restart"
+          Write-Host "========================================"
+          Write-Host "  RAM  : $([math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB,2)) GB"
+          Write-Host "  CPU  : $env:NUMBER_OF_PROCESSORS cores"
+          Write-Host "  DISK : $([math]::Round((Get-PSDrive C).Free/1GB,2)) GB free"
+          Write-Host "========================================"
+        shell: powershell
+
+      # ─────────────────────────────────────────
+      # SESSION (4h 30min)
+      # ─────────────────────────────────────────
+      - name: ⏳ Active session (4h 30min)
+        run: Start-Sleep -Seconds 16200
+        shell: powershell
+
+      # ─────────────────────────────────────────
+      # BACKUP TO REPO
+      # ─────────────────────────────────────────
+      - name: 💾 Backup user data
+        run: |
+          Write-Host "💾 Starting backup..."
+          New-Item -ItemType Directory -Force -Path "backup" | Out-Null
+
+          # Backup Desktop, Documents, Downloads
+          $items = @(
+            "C:\Users\runneradmin\Desktop",
+            "C:\Users\runneradmin\Documents",
+            "C:\Users\runneradmin\Downloads",
+            "C:\Users\runneradmin\AppData\Roaming\Microsoft\Windows\Recent"
+          )
+
+          # Only include existing paths
+          $existing = $items | Where-Object { Test-Path $_ }
+
+          if ($existing.Count -gt 0) {
+            Compress-Archive -Path $existing `
+              -DestinationPath "backup\userdata.zip" `
+              -Force
+            $size = [math]::Round(
+              (Get-Item "backup\userdata.zip").Length/1MB, 2
+            )
+            Write-Host "✅ Backup complete! Size: $size MB"
+          } else {
+            Write-Host "⚠️ No user data to backup."
+          }
+        shell: powershell
+
+      - name: 📤 Push backup to GitHub
+        run: |
+          git add backup/userdata.zip rdp-info.txt 2>/dev/null || true
+          git diff --staged --quiet || \
+            git commit -m "💾 Auto backup - $(date '+%Y-%m-%d %H:%M:%S UTC')"
+          git push origin HEAD || true
+        shell: bash
+
+      # ─────────────────────────────────────────
+      # TRIGGER NEXT RUN
+      # ─────────────────────────────────────────
+      - name: 🔄 Trigger next session
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: gh workflow run rdp.yml
+        run: |
+          gh workflow run rdp.yml
+          echo "✅ Next session triggered!"
+          echo "⏳ Windows RDP ready again in ~3 minutes!"
+        shell: bash
