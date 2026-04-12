@@ -3,7 +3,7 @@ name: Kavishka
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */5 * * *'  # Every 5 hours
+    - cron: '0 */5 * * *'
 
 jobs:
   rdp:
@@ -101,46 +101,34 @@ jobs:
             --no-install-recommends
           echo "✅ All packages installed!"
 
-            # ─────────────────────────────────────────
-      # CONFIGURE XRDP (RELIABLE VERSION)
+      # ─────────────────────────────────────────
+      # CONFIGURE XRDP
       # ─────────────────────────────────────────
       - name: 🚀 Configure XRDP
         run: |
-          # Kill any existing xrdp processes
           sudo pkill -9 xrdp || true
           sudo pkill -9 xrdp-sesman || true
           sleep 2
           
-          # Ensure XRDP is installed
           sudo apt install -y xrdp xorgxrdp
-          
-          # Add user to ssl-cert group
           sudo adduser xrdp ssl-cert || true
-          
-          # Generate SSL certificate
           sudo xrdp-keygen xrdp /etc/xrdp/key.pem /etc/xrdp/cert.pem || true
           
-          # Configure xrdp.ini
           sudo sed -i 's/3389/3389/g' /etc/xrdp/xrdp.ini
           sudo sed -i 's/security_layer=rdp/security_layer=rdp/g' /etc/xrdp/xrdp.ini
           sudo sed -i 's/max_bpp=32/max_bpp=24/g' /etc/xrdp/xrdp.ini
           sudo sed -i 's/crypt_level=low/crypt_level=high/g' /etc/xrdp/xrdp.ini
-          
-          # Configure sesman
           sudo sed -i 's/ListenAddress=127.0.0.1/ListenAddress=0.0.0.0/g' /etc/xrdp/sesman.ini
           
-          # Create .xsession file for rdpuser
           echo "xfce4-session" | sudo tee /home/rdpuser/.xsession > /dev/null
           sudo chown rdpuser:rdpuser /home/rdpuser/.xsession
           sudo chmod 644 /home/rdpuser/.xsession
           
-          # Start XRDP manually (more reliable than systemctl in GitHub Actions)
           sudo xrdp || true
           sudo xrdp-sesman || true
           
           sleep 3
           
-          # Verify it's running
           echo "=== XRDP Process Check ==="
           ps aux | grep xrdp | grep -v grep
           
@@ -155,7 +143,7 @@ jobs:
       - name: 🌐 Update DuckDNS with current IP
         env:
           DUCKDNS_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
-          DUCKDNS_DOMAIN: ${{ secrets.DUCKDNS_DOMAIN }}  # e.g., "myrdp" (without .duckdns.org)
+          DUCKDNS_DOMAIN: ${{ secrets.DUCKDNS_DOMAIN }}
         run: |
           CURRENT_IP=$(curl -s https://api.ipify.org)
           echo "📡 Current runner IP: $CURRENT_IP"
@@ -170,13 +158,13 @@ jobs:
           fi
 
       # ─────────────────────────────────────────
-      # XFCE PERFORMANCE TWEAKS
+      # XFCE PERFORMANCE TWEAKS (FIXED INDENTATION)
       # ─────────────────────────────────────────
       - name: 🎨 Optimize XFCE
         run: |
           sudo -u rdpuser mkdir -p /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml
 
-          sudo tee /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml > /dev/null <<'EOF'
+          cat << 'XFWM4_EOF' | sudo tee /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml > /dev/null
           <?xml version="1.0" encoding="UTF-8"?>
           <channel name="xfwm4" version="1.0">
             <property name="general" type="empty">
@@ -188,9 +176,9 @@ jobs:
               <property name="vblank_mode" type="string" value="off"/>
             </property>
           </channel>
-          EOF
+          XFWM4_EOF
 
-          sudo tee /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml > /dev/null <<'EOF'
+          cat << 'XSETTINGS_EOF' | sudo tee /home/rdpuser/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml > /dev/null
           <?xml version="1.0" encoding="UTF-8"?>
           <channel name="xsettings" version="1.0">
             <property name="Net" type="empty">
@@ -202,7 +190,7 @@ jobs:
               <property name="CursorThemeSize" type="int" value="16"/>
             </property>
           </channel>
-          EOF
+          XSETTINGS_EOF
 
           sudo chown -R rdpuser:rdpuser /home/rdpuser/.config
           echo "✅ XFCE optimized!"
@@ -219,22 +207,17 @@ jobs:
           echo "  🖥️  RDP CONNECTION DETAILS"
           echo "========================================"
           echo "  🌐 DDNS HOST : ${DUCKDNS_DOMAIN}.duckdns.org"
-          echo "  📡 CURRENT IP: $CURRENT_IP (changes every run)"
+          echo "  📡 CURRENT IP: $CURRENT_IP"
           echo "  👤 USERNAME  : rdpuser"
           echo "  🔑 PASSWORD  : (from secrets.RDP_PASSWORD)"
           echo "  🔌 PORT      : 3389"
           echo "========================================"
-          echo "  ⚠️ NOTE: IP changes every workflow run!"
-          echo "     DDNS hostname stays the same."
-          echo "     Wait ~1-2 min after workflow starts for DNS to propagate."
+          echo "  ⚠️ Wait 1-2 min for DNS propagation"
           echo "========================================"
-          echo "  💡 Windows:"
-          echo "     Win+R → mstsc"
-          echo "     Computer: ${DUCKDNS_DOMAIN}.duckdns.org:3389"
-          echo "  💡 Linux:"
-          echo "     xfreerdp /v:${DUCKDNS_DOMAIN}.duckdns.org:3389 /u:rdpuser /p:yourpassword"
+          echo "  💡 Windows: mstsc → ${DUCKDNS_DOMAIN}.duckdns.org:3389"
+          echo "  💡 Linux: xfreerdp /v:${DUCKDNS_DOMAIN}.duckdns.org:3389 /u:rdpuser"
           echo "========================================"
-          echo "  XRDP : $(sudo systemctl is-active xrdp)"
+          echo "  XRDP : $(sudo systemctl is-active xrdp || echo 'manual')"
           echo "  RAM  : $(free -h | grep Mem | awk '{print $3"/"$2}')"
           echo "  CPU  : $(nproc) cores"
           echo "========================================"
