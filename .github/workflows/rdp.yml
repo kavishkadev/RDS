@@ -44,52 +44,15 @@ jobs:
       # CREATE USER KAVISHKA
       # ─────────────────────────────────────────
       - name: Create user kavishka
-        shell: powershell
+        shell: cmd
         run: |
-          $pass = "${{ secrets.RDP_PASSWORD }}"
-          $secPass = ConvertTo-SecureString $pass -AsPlainText -Force
-
-          # Check if user exists using Get-LocalUser
-          $userExists = $false
-          try {
-            Get-LocalUser -Name "kavishka" -ErrorAction Stop | Out-Null
-            $userExists = $true
-          } catch {
-            $userExists = $false
-          }
-
-          if ($userExists) {
-            Write-Host "User kavishka exists. Updating password..."
-            Set-LocalUser -Name "kavishka" -Password $secPass -ErrorAction Stop
-          } else {
-            Write-Host "Creating user kavishka..."
-            New-LocalUser `
-              -Name "kavishka" `
-              -Password $secPass `
-              -FullName "Kavishka" `
-              -Description "RDP User" `
-              -PasswordNeverExpires `
-              -ErrorAction Stop
-          }
-
-          # Add to groups safely
-          try {
-            Add-LocalGroupMember -Group "Administrators" -Member "kavishka" -ErrorAction Stop
-            Write-Host "Added to Administrators"
-          } catch {
-            Write-Host "Already in Administrators or error: $_"
-          }
-
-          try {
-            Add-LocalGroupMember -Group "Remote Desktop Users" -Member "kavishka" -ErrorAction Stop
-            Write-Host "Added to Remote Desktop Users"
-          } catch {
-            Write-Host "Already in Remote Desktop Users or error: $_"
-          }
-
-          # Enable account
-          Enable-LocalUser -Name "kavishka"
-          Write-Host "User kavishka is ready!"
+          net user kavishka "${{ secrets.RDP_PASSWORD }}" /add /y
+          net localgroup Administrators kavishka /add
+          net localgroup "Remote Desktop Users" kavishka /add
+          net user kavishka /expires:never
+          net user kavishka /active:yes
+          echo User kavishka created successfully!
+          net user kavishka
 
       # ─────────────────────────────────────────
       # RESTORE BACKUP
