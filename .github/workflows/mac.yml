@@ -98,82 +98,73 @@ jobs:
           sudo lsof -i :5900 2>/dev/null | head -5 || echo "Port 5900 checked"
 
       # ─────────────────────────────────────────
-      # INSTALL TAILSCALE (macOS native via brew)
+      # INSTALL TAILSCALE
       # ─────────────────────────────────────────
       - name: Install Tailscale
         run: |
-          echo "Architecture: $(uname -m)"
-          echo "Installing Tailscale via brew (native macOS binary)..."
-
-          # brew installs the correct macOS native binary automatically
+          echo "Installing Tailscale via brew..."
           brew install tailscale
-
-          # Verify it's a proper macOS binary
-          echo "Binary info:"
-          file $(which tailscale)
-          echo "Version:"
-          tailscale version
+          echo "Version: $(tailscale version)"
+          echo "Path: $(which tailscale)"
           echo "Tailscale installed!"
 
       # ─────────────────────────────────────────
-      # CONNECT TAILSCALE
+      # CONNECT TAILSCALE (no --socket flag)
       # ─────────────────────────────────────────
       - name: Connect Tailscale
         run: |
-          # Kill any existing
+          # Kill existing
           sudo pkill -9 tailscaled 2>/dev/null || true
           sleep 3
 
-          # Find tailscaled path from brew
-          TAILSCALED=$(find /opt/homebrew /usr/local -name "tailscaled" 2>/dev/null | head -1)
-          TAILSCALE=$(find /opt/homebrew /usr/local -name "tailscale" -not -name "tailscaled" 2>/dev/null | head -1)
+          # Find brew tailscaled path
+          TAILSCALED=$(which tailscaled 2>/dev/null || \
+            find /opt/homebrew /usr/local -name "tailscaled" 2>/dev/null | head -1)
+          TAILSCALE=$(which tailscale 2>/dev/null || \
+            find /opt/homebrew /usr/local -name "tailscale" \
+            -not -name "tailscaled" 2>/dev/null | head -1)
 
           echo "tailscaled: $TAILSCALED"
           echo "tailscale : $TAILSCALE"
 
-          # Create dirs
+          # Create state dir
           sudo mkdir -p /var/lib/tailscale
-          sudo mkdir -p /var/run
 
-          # Start daemon
+          # Start tailscaled (NO --socket flag for brew version)
           echo "Starting tailscaled..."
           sudo "$TAILSCALED" \
             --state=/var/lib/tailscale/tailscaled.state \
-            --socket=/var/run/tailscaled.socket \
             > /tmp/tailscaled.log 2>&1 &
 
-          echo "Waiting for socket..."
-          for i in {1..20}; do
-            sleep 2
-            if [ -S /var/run/tailscaled.socket ]; then
-              echo "Socket ready!"
-              break
-            fi
-            echo "Waiting $i/20..."
-          done
+          echo "Waiting for tailscaled to start..."
+          sleep 10
 
-          # Connect
+          # Connect (NO --socket flag)
           echo "Connecting to Tailscale..."
           sudo "$TAILSCALE" up \
             --authkey="${{ secrets.TS_AUTHKEY_MAC }}" \
             --hostname="github-macos-vnc" \
             --accept-routes \
-            --socket=/var/run/tailscaled.socket \
-            > /tmp/tsup.log 2>&1 &
+            --timeout=30s \
+            > /tmp/tsup.log 2>&1
 
-          # Wait for IP
-          echo "Waiting for IP..."
+          echo "tailscale up exit: $?"
+          cat /tmp/tsup.log || true
+
+          sleep 5
+
+          # Get IP (NO --socket flag)
+          echo "Getting IP..."
           TS_IP=""
-          for i in {1..40}; do
+          for i in {1..20}; do
             sleep 3
-            TS_IP=$(sudo "$TAILSCALE" ip -4 \
-              --socket=/var/run/tailscaled.socket 2>/dev/null | \
+            TS_IP=$(sudo "$TAILSCALE" ip -4 2>/dev/null | \
               head -1 | tr -d '[:space:]')
             if [[ "$TS_IP" == 100.* ]]; then
               echo "Got IP: $TS_IP"
               break
             fi
-            echo "Attempt $i/40..."
+            echo "Attempt $i/20..."
           done
 
           if [[ "$TS_IP" != 100.* ]]; then
@@ -224,24 +215,19 @@ jobs:
           echo "  USERNAME     : runner"
           echo "  PASSWORD     : your VNC_PASSWORD secret"
           echo "========================================"
-          echo "  VNC (RealVNC Viewer):"
-          echo "  Open RealVNC -> type: $TS_IP"
+          echo "  VNC - RealVNC Viewer:"
+          echo "  Address: $TS_IP"
           echo "  Password: your VNC_PASSWORD"
           echo "========================================"
-          echo "  SSH (Terminal/PuTTY):"
+          echo "  SSH - Terminal/PuTTY:"
           echo "  ssh runner@$TS_IP"
           echo "========================================"
-          echo "  STEPS TO CONNECT FROM WINDOWS:"
-          echo "  1. Install Tailscale on your Windows PC"
-          echo "     tailscale.com/download"
+          echo "  STEPS FROM WINDOWS:"
+          echo "  1. Install Tailscale -> tailscale.com/download"
           echo "  2. Login with SAME Tailscale account"
-          echo "     used for TS_AUTHKEY_MAC"
           echo "  3. Install RealVNC Viewer"
-          echo "     realvnc.com/download/viewer"
-          echo "  4. Open RealVNC Viewer"
-          echo "  5. Address bar: $TS_IP"
-          echo "  6. Press Enter"
-          echo "  7. Password: your VNC_PASSWORD"
+          echo "  4. Open RealVNC -> type: $TS_IP"
+          echo "  5. Password: your VNC_PASSWORD"
           echo "========================================"
           echo "  macOS  : $(sw_vers -productVersion)"
           echo "  Arch   : $(uname -m)"
