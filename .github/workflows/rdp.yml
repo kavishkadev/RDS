@@ -162,7 +162,6 @@ jobs:
           net share Transfer
           echo ==================================
 
-
       # ─────────────────────────────────────────
       # INSTALL TAILSCALE
       # ─────────────────────────────────────────
@@ -243,103 +242,6 @@ jobs:
           Add-Content -Path "rdp-info.txt" -Value "3. RDP: mstsc -> $tsIP -> kavishka"
 
       # ─────────────────────────────────────────
-      # GET OAUTH TOKEN
-      # ─────────────────────────────────────────
-      - name: Get Tailscale OAuth Token
-        shell: bash
-        id: oauth
-        run: |
-          echo "Obtaining OAuth token..."
-          
-          # Read secrets into variables (handle Windows line endings)
-          CLIENT_ID="${{ secrets.TS_CLIENT_ID }}"
-          CLIENT_SECRET="${{ secrets.TS_CLIENT_SECRET }}"
-          
-          # Check if secrets are set
-          if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ]; then
-            echo "::warning::TS_CLIENT_ID or TS_CLIENT_SECRET not set. Skipping auto-approve."
-            echo "oauth_token=" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          # Get OAuth token using curl (with proper error handling)
-          RESPONSE=$(curl -s -X POST "https://login.tailscale.com/api/v2/oauth/token" \
-            -u "$CLIENT_ID:$CLIENT_SECRET" \
-            -d "grant_type=client_credentials&scope=device" \
-            -w "\n%{http_code}")
-          
-          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
-          
-          if [ "$HTTP_CODE" = "200" ]; then
-            # Extract token from JSON response
-            TOKEN=$(echo "$BODY" | grep -o '"access_token":"[^"]*' | cut -d'"' -f4)
-            
-            if [ -n "$TOKEN" ]; then
-              echo "oauth_token=$TOKEN" >> $GITHUB_OUTPUT
-              echo "✅ OAuth token obtained successfully!"
-              echo "Token length: ${#TOKEN} characters"
-            else
-              echo "::warning::Failed to parse access token from response"
-              echo "oauth_token=" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "::warning::OAuth request failed with HTTP $HTTP_CODE"
-            echo "Response: $BODY"
-            echo "oauth_token=" >> $GITHUB_OUTPUT
-          fi
-      # ─────────────────────────────────────────
-      # APPROVE EXIT NODE
-      # ─────────────────────────────────────────
-      - name: Approve Exit Node in Tailscale
-        shell: powershell
-        if: ${{ steps.oauth.outputs.oauth_token != '' }}
-        run: |
-          Write-Host "Approving Exit Node in Tailscale admin..."
-          
-          $headers = @{
-              "Authorization" = "Bearer ${{ steps.oauth.outputs.oauth_token }}"
-              "Content-Type" = "application/json"
-          }
-          
-          try {
-            $nodes = Invoke-RestMethod `
-                -Uri "https://api.tailscale.com/api/v2/tailnet/_/devices" `
-                -Headers $headers `
-                -Method GET
-            
-            $rdpNode = $nodes.devices | Where-Object { $_.name -eq "github-rdp" }
-            
-            if ($rdpNode) {
-                Write-Host "Found node: $($rdpNode.name) (ID: $($rdpNode.id))"
-                
-                $body = @{
-                    routes = @{
-                        "$($rdpNode.id)" = @{
-                            "0.0.0.0/0" = $true
-                        }
-                    }
-                } | ConvertTo-Json -Depth 3
-                
-                Invoke-RestMethod `
-                    -Uri "https://api.tailscale.com/api/v2/tailnet/_/devices/$($rdpNode.id)/routes" `
-                    -Headers $headers `
-                    -Method POST `
-                    -Body $body
-                
-                Write-Host "Exit Node approved successfully!"
-            } else {
-                Write-Host "Warning: Could not find node 'github-rdp'"
-                Write-Host "Please approve manually at: https://login.tailscale.com/admin/machines"
-            }
-          }
-          catch {
-            Write-Host "Warning: Failed to auto-approve exit node."
-            Write-Host "Error: $($_.Exception.Message)"
-            Write-Host "Please approve manually at: https://login.tailscale.com/admin/machines"
-          }
-
-      # ─────────────────────────────────────────
       # PUSH RDP INFO
       # ─────────────────────────────────────────
       - name: Push RDP info to repo
@@ -350,7 +252,7 @@ jobs:
           git push origin HEAD || true
 
       # ─────────────────────────────────────────
-      # CONNECTION DETAILS
+      # CONNECTION DETAILS (FIXED)
       # ─────────────────────────────────────────
       - name: Connection Details
         shell: powershell
@@ -359,6 +261,7 @@ jobs:
           $tsIP  = (& $tsExe ip -4).Trim()
           $ram   = [math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB, 2)
           $disk  = [math]::Round((Get-PSDrive C).Free/1GB, 2)
+          $cores = $env:NUMBER_OF_PROCESSORS
           
           Write-Host ""
           Write-Host "========================================"
@@ -368,15 +271,41 @@ jobs:
           Write-Host "  USERNAME     : kavishka"
           Write-Host "  PASSWORD     : (your RDP_PASSWORD secret)"
           Write-Host "========================================"
-          Write-Host "  📁 FILE TRANSFER (Zero Internet):"
-          Write-Host "     Win+R -> \\$tsIP\Transfer"
-          Write-Host "     Login: kavishka / (RDP_PASSWORD)"
-          Write-Host "  🌐 EXIT NODE (Use VM Internet):"
-          Write-Host "     tailscale up --exit-node=$tsIP"
-          Write-Host "  🖥️  RDP ACCESS:"
-          Write-Host "     mstsc -> Computer: $tsIP"
+          Write-Host "  METHOD 1: FILE TRANSFER (No Internet)"
+          Write-Host "  -----------------------------------"
+          Write-Host "  On your laptop:"
+          Write-Host "  1. Win+R -> \\$tsIP\Transfer"
+          Write-Host "  2. Login: kavishka / (RDP_PASSWORD)"
+          Write-Host "  3. Drag and drop files"
+          Write-Host "  All traffic stays in Tailscale tunnel"
+          Write-Host ""
+          Write-Host "  METHOD 2: USE VM INTERNET (Exit Node)"
+          Write-Host "  -----------------------------------"
+          Write-Host "  On your laptop (PowerShell):"
+          Write-Host "  tailscale up --exit-node=$tsIP"
+          Write-Host ""
+          Write-Host "  Now ALL your internet uses VM's connection!"
+          Write-Host "  - Your IP becomes: VM's public IP"
+          Write-Host "  - Your bandwidth = VM's bandwidth"
+          Write-Host "  - Disable: tailscale up --exit-node="
+          Write-Host ""
+          Write-Host "  METHOD 3: RDP ACCESS"
+          Write-Host "  -----------------------------------"
+          Write-Host "  1. Win+R -> mstsc"
+          Write-Host "  2. Computer: $tsIP"
+          Write-Host "  3. Username: kavishka"
+          Write-Host "  4. Password: (your RDP_PASSWORD)"
+          Write-Host ""
           Write-Host "========================================"
-          Write-Host "  VM SPECS: $ram GB RAM | $env:NUMBER_OF_PROCESSORS Cores | $disk GB Free"
+          Write-Host "  VM SPECS:"
+          Write-Host "  RAM  : $ram GB"
+          Write-Host "  CPU  : $cores cores"
+          Write-Host "  DISK : $disk GB free"
+          Write-Host "========================================"
+          Write-Host ""
+          Write-Host "  IMPORTANT: Approve Exit Node at:"
+          Write-Host "  https://login.tailscale.com/admin/machines"
+          Write-Host "  Click on 'github-rdp' - Edit routes - Enable 0.0.0.0/0"
           Write-Host "========================================"
 
       # ─────────────────────────────────────────
@@ -388,20 +317,23 @@ jobs:
           $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
           $tsIP = (& $tsExe ip -4).Trim()
           
-          Write-Host "⏰ Session active for 4h 30min..."
-          Write-Host "💡 File share: \\$tsIP\Transfer"
-          Write-Host "💡 Exit node: tailscale up --exit-node=$tsIP"
+          Write-Host "Session active for 4h 30min..."
+          Write-Host "File share: \\$tsIP\Transfer"
+          Write-Host "Exit node: tailscale up --exit-node=$tsIP"
           
           for ($i = 1; $i -le 270; $i++) {
             if ($i % 30 -eq 0) {
-              Write-Host "⏳ ${i}min elapsed - Share: \\$tsIP\Transfer"
+              Write-Host "${i}min elapsed - Share: \\$tsIP\Transfer"
+              
+              # Verify Tailscale still connected
               $status = & $tsExe status 2>&1
               if ($LASTEXITCODE -ne 0) {
-                Write-Host "⚠️  Warning: Tailscale may be disconnected"
+                Write-Host "Warning: Tailscale may be disconnected"
               }
             }
             Start-Sleep -Seconds 60
           }
+          
           Write-Host "Session completed"
 
       # ─────────────────────────────────────────
@@ -413,9 +345,11 @@ jobs:
           Write-Host "Starting backup..."
           New-Item -ItemType Directory -Force -Path "backup" | Out-Null
           
+          # Also backup shared transfer folder
           if (Test-Path "C:\Transfer") {
             $transferItems = Get-ChildItem "C:\Transfer" -ErrorAction SilentlyContinue
             if ($transferItems) {
+              Write-Host "Backing up Transfer folder..."
               Compress-Archive -Path "C:\Transfer\*" `
                 -DestinationPath "backup\transfer.zip" -Force
             }
@@ -441,7 +375,7 @@ jobs:
         shell: bash
         run: |
           git add backup/ rdp-info.txt 2>/dev/null || true
-          git diff --staged --quiet || \
+          git diff --staged --quiet || `
             git commit -m "Auto backup - $(date '+%Y-%m-%d %H:%M:%S UTC')"
           git push origin HEAD || true
 
