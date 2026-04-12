@@ -29,13 +29,12 @@ jobs:
       # CHECKOUT REPO
       # ─────────────────────────────────────────
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_PAT }}
           fetch-depth: 0
 
       - name: Configure Git
-        shell: bash
         run: |
           git config user.name "RDP Bot"
           git config user.email "rdpbot@github.com"
@@ -49,16 +48,16 @@ jobs:
           Write-Host "Disabling password complexity..."
           secedit /export /cfg C:\secpol.cfg /quiet
           $content = Get-Content C:\secpol.cfg
-          $content = $content -replace "PasswordComplexity\s*=\s*\d",    "PasswordComplexity = 0"
+          $content = $content -replace "PasswordComplexity\s*=\s*\d", "PasswordComplexity = 0"
           $content = $content -replace "MinimumPasswordLength\s*=\s*\d+", "MinimumPasswordLength = 1"
-          $content = $content -replace "PasswordHistorySize\s*=\s*\d+",   "PasswordHistorySize = 0"
-          $content = $content -replace "MaximumPasswordAge\s*=\s*\d+",    "MaximumPasswordAge = -1"
+          $content = $content -replace "PasswordHistorySize\s*=\s*\d+", "PasswordHistorySize = 0"
+          $content = $content -replace "MaximumPasswordAge\s*=\s*\d+", "MaximumPasswordAge = -1"
           $content | Set-Content C:\secpol.cfg
           secedit /configure /db C:\Windows\security\local.sdb /cfg C:\secpol.cfg /quiet
           Write-Host "Password policy disabled!"
 
       # ─────────────────────────────────────────
-      # CREATE USER KAVISHKA (using cmd shell)
+      # CREATE USER KAVISHKA
       # ─────────────────────────────────────────
       - name: Create user kavishka
         shell: cmd
@@ -132,6 +131,37 @@ jobs:
           Write-Host "RDP Service: $((Get-Service TermService).Status)"
 
       # ─────────────────────────────────────────
+      # CREATE SHARED FOLDER FOR FILE TRANSFER
+      # ─────────────────────────────────────────
+      - name: Create shared folder
+        shell: powershell
+        run: |
+          Write-Host "Creating shared folder for file transfer..."
+          
+          # Create folder
+          New-Item -ItemType Directory -Force -Path "C:\Transfer" | Out-Null
+          
+          # Share the folder
+          New-SmbShare -Name "Transfer" -Path "C:\Transfer" `
+            -FullAccess "Everyone" -ChangeAccess "Everyone" -ReadAccess "Everyone" `
+            -Force | Out-Null
+          
+          # Set NTFS permissions
+          icacls "C:\Transfer" /grant "Everyone:(OI)(CI)F" /T | Out-Null
+          
+          # Allow SMB through firewall (restrict to Tailscale subnet)
+          New-NetFirewallRule -DisplayName "Allow SMB from Tailscale" `
+            -Direction Inbound `
+            -LocalPort 445 `
+            -Protocol TCP `
+            -RemoteAddress 100.64.0.0/10 `
+            -Action Allow `
+            -Force | Out-Null
+          
+          Write-Host "Shared folder created: C:\Transfer"
+          Write-Host "Access via: \\TAILSCALE_IP\Transfer"
+
+      # ─────────────────────────────────────────
       # INSTALL TAILSCALE
       # ─────────────────────────────────────────
       - name: Install Tailscale
@@ -142,10 +172,15 @@ jobs:
           $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
           $out = Join-Path $env:TEMP "tailscale-setup.exe"
           Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+          
           Write-Host "Installing..."
-          $proc = Start-Process -FilePath $out -ArgumentList "/S" -Wait -PassThru -NoNewWindow
+          $proc = Start-Process -FilePath $out `
+            -ArgumentList "/S" `
+            -Wait -PassThru -NoNewWindow
+          
           Write-Host "Exit code: $($proc.ExitCode)"
           Start-Sleep -Seconds 15
+          
           if (Test-Path "C:\Program Files\Tailscale\tailscale.exe") {
             Write-Host "Tailscale installed OK!"
           } else {
@@ -154,32 +189,115 @@ jobs:
           }
 
       # ─────────────────────────────────────────
-      # CONNECT TAILSCALE
+      # CONNECT TAILSCALE + ADVERTISE EXIT NODE
       # ─────────────────────────────────────────
-      - name: Connect Tailscale
+      - name: Connect Tailscale + Enable Exit Node
         shell: powershell
         run: |
           $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
           $tsKey = "${{ secrets.TS_AUTHKEY }}"
 
-          & $tsExe up --authkey=$tsKey --hostname="github-rdp" --accept-routes
-          Start-Sleep -Seconds 15
+          Write-Host "Connecting to Tailscale and advertising as Exit Node..."
+          
+          & $tsExe up `
+            --authkey=$tsKey `
+            --hostname="github-rdp" `
+            --accept-routes `
+            --advertise-exit-node `
+            --advertise-routes=100.64.0.0/10
 
+          Start-Sleep -Seconds 20
+
+          # Get Tailscale IP
           $tsIP = (& $tsExe ip -4).Trim()
+          
+          # Get public IP (for verification)
+          $publicIP = (Invoke-RestMethod -Uri "https://ifconfig.me/ip").Trim()
 
           Write-Host "========================================"
-          Write-Host "  Tailscale Connected!"
-          Write-Host "  FIXED RDP IP : $tsIP"
-          Write-Host "  USERNAME     : kavishka"
-          Write-Host "  PASSWORD     : your RDP_PASSWORD secret"
-          Write-Host "  PORT         : 3389"
+          Write-Host "  TAILSCALE CONNECTED + EXIT NODE READY"
+          Write-Host "========================================"
+          Write-Host "  TAILSCALE IP   : $tsIP"
+          Write-Host "  PUBLIC IP      : $publicIP"
+          Write-Host "  USERNAME       : kavishka"
+          Write-Host "  PASSWORD       : your RDP_PASSWORD secret"
+          Write-Host "  RDP PORT       : 3389"
+          Write-Host "  SMB SHARE      : \\$tsIP\Transfer"
+          Write-Host "========================================"
+          Write-Host "  FEATURES ENABLED:"
+          Write-Host "  1. RDP Access"
+          Write-Host "  2. File Share (no internet needed)"
+          Write-Host "  3. Exit Node (use VM's internet)"
           Write-Host "========================================"
 
+          # Save info
           Set-Content -Path "rdp-info.txt" -Value "RDP_IP=$tsIP"
+          Add-Content -Path "rdp-info.txt" -Value "PUBLIC_IP=$publicIP"
           Add-Content -Path "rdp-info.txt" -Value "USERNAME=kavishka"
-          Add-Content -Path "rdp-info.txt" -Value "PORT=3389"
+          Add-Content -Path "rdp-info.txt" -Value "PASSWORD=${{ secrets.RDP_PASSWORD }}"
+          Add-Content -Path "rdp-info.txt" -Value "RDP_PORT=3389"
+          Add-Content -Path "rdp-info.txt" -Value "SMB_SHARE=\\$tsIP\Transfer"
           Add-Content -Path "rdp-info.txt" -Value "STARTED=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') UTC"
           Add-Content -Path "rdp-info.txt" -Value "EXPIRES=$((Get-Date).AddHours(5).ToString('yyyy-MM-dd HH:mm:ss')) UTC"
+          Add-Content -Path "rdp-info.txt" -Value ""
+          Add-Content -Path "rdp-info.txt" -Value "HOW TO USE:"
+          Add-Content -Path "rdp-info.txt" -Value "1. FILE TRANSFER (no internet):"
+          Add-Content -Path "rdp-info.txt" -Value "   - Access: \\$tsIP\Transfer"
+          Add-Content -Path "rdp-info.txt" -Value "   - Copy files to/from this folder"
+          Add-Content -Path "rdp-info.txt" -Value ""
+          Add-Content -Path "rdp-info.txt" -Value "2. USE VM INTERNET (Exit Node):"
+          Add-Content -Path "rdp-info.txt" -Value "   - On your laptop: tailscale up --exit-node=$tsIP"
+          Add-Content -Path "rdp-info.txt" -Value "   - All your internet will use VM's connection"
+          Add-Content -Path "rdp-info.txt" -Value ""
+          Add-Content -Path "rdp-info.txt" -Value "3. RDP ACCESS:"
+          Add-Content -Path "rdp-info.txt" -Value "   - mstsc -> Computer: $tsIP"
+          Add-Content -Path "rdp-info.txt" -Value "   - Username: kavishka"
+          Add-Content -Path "rdp-info.txt" -Value "   - Password: (your RDP_PASSWORD)"
+
+      # ─────────────────────────────────────────
+      # APPROVE EXIT NODE (via API)
+      # ─────────────────────────────────────────
+      - name: Approve Exit Node in Tailscale
+        shell: powershell
+        run: |
+          Write-Host "Approving Exit Node in Tailscale admin..."
+          
+          # Get node ID
+          $headers = @{
+            "Authorization" = "Bearer ${{ secrets.TS_OAUTH_TOKEN }}"
+            "Content-Type" = "application/json"
+          }
+          
+          $nodes = Invoke-RestMethod `
+            -Uri "https://api.tailscale.com/api/v2/tailnet/_/devices" `
+            -Headers $headers `
+            -Method GET
+          
+          $rdpNode = $nodes.devices | Where-Object { $_.name -eq "github-rdp" }
+          
+          if ($rdpNode) {
+            Write-Host "Found node: $($rdpNode.name) (ID: $($rdpNode.id))"
+            
+            # Approve routes
+            $body = @{
+              routes = @{
+                "$($rdpNode.id)" = @{
+                  "0.0.0.0/0" = $true
+                }
+              }
+            } | ConvertTo-Json -Depth 3
+            
+            Invoke-RestMethod `
+              -Uri "https://api.tailscale.com/api/v2/tailnet/_/devices/$($rdpNode.id)/routes" `
+              -Headers $headers `
+              -Method POST `
+              -Body $body
+            
+            Write-Host "Exit Node approved!"
+          } else {
+            Write-Host "Warning: Could not find node automatically."
+            Write-Host "Please approve manually at: https://login.tailscale.com/admin/machines"
+          }
 
       # ─────────────────────────────────────────
       # PUSH RDP INFO
@@ -201,25 +319,51 @@ jobs:
           $tsIP  = (& $tsExe ip -4).Trim()
           $ram   = [math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB, 2)
           $disk  = [math]::Round((Get-PSDrive C).Free/1GB, 2)
+          
+          Write-Host ""
           Write-Host "========================================"
-          Write-Host "  WINDOWS RDP - READY TO CONNECT"
+          Write-Host "  WINDOWS RDP + EXIT NODE - READY!"
           Write-Host "========================================"
-          Write-Host "  IP       : $tsIP"
-          Write-Host "  USERNAME : kavishka"
-          Write-Host "  PASSWORD : your RDP_PASSWORD secret"
-          Write-Host "  PORT     : 3389"
+          Write-Host "  TAILSCALE IP : $tsIP"
+          Write-Host "  USERNAME     : kavishka"
+          Write-Host "  PASSWORD     : (your RDP_PASSWORD secret)"
           Write-Host "========================================"
-          Write-Host "  HOW TO CONNECT:"
-          Write-Host "  1. Install Tailscale on your PC"
-          Write-Host "  2. Login with SAME Tailscale account"
-          Write-Host "  3. Win+R -> mstsc -> Enter"
-          Write-Host "  4. Computer: $tsIP"
-          Write-Host "  5. Username: kavishka"
-          Write-Host "  6. Password: your RDP_PASSWORD"
+          Write-Host ""
+          Write-Host "  METHOD 1: FILE TRANSFER (No Internet)"
+          Write-Host "  ───────────────────────────────────"
+          Write-Host "  On your laptop:"
+          Write-Host "  1. Win+R -> \\$tsIP\Transfer"
+          Write-Host "  2. Login: kavishka / (RDP_PASSWORD)"
+          Write-Host "  3. Drag & drop files"
+          Write-Host "  ✅ All traffic stays in Tailscale tunnel"
+          Write-Host ""
+          Write-Host "  METHOD 2: USE VM INTERNET (Exit Node)"
+          Write-Host "  ───────────────────────────────────"
+          Write-Host "  On your laptop (PowerShell):"
+          Write-Host "  tailscale up --exit-node=$tsIP"
+          Write-Host ""
+          Write-Host "  Now ALL your internet uses VM's connection!"
+          Write-Host "  - Your IP becomes: VM's public IP"
+          Write-Host "  - Your bandwidth = VM's bandwidth"
+          Write-Host "  - Disable: tailscale up --exit-node="
+          Write-Host ""
+          Write-Host "  METHOD 3: RDP ACCESS"
+          Write-Host "  ───────────────────────────────────"
+          Write-Host "  1. Win+R -> mstsc"
+          Write-Host "  2. Computer: $tsIP"
+          Write-Host "  3. Username: kavishka"
+          Write-Host "  4. Password: (your RDP_PASSWORD)"
+          Write-Host ""
           Write-Host "========================================"
+          Write-Host "  VM SPECS:"
           Write-Host "  RAM  : $ram GB"
           Write-Host "  CPU  : $env:NUMBER_OF_PROCESSORS cores"
           Write-Host "  DISK : $disk GB free"
+          Write-Host "========================================"
+          Write-Host ""
+          Write-Host "  IMPORTANT: Approve Exit Node at:"
+          Write-Host "  https://login.tailscale.com/admin/machines"
+          Write-Host "  Click on 'github-rdp' -> Edit routes -> Enable 0.0.0.0/0"
           Write-Host "========================================"
 
       # ─────────────────────────────────────────
@@ -227,7 +371,28 @@ jobs:
       # ─────────────────────────────────────────
       - name: Active session 4h 30min
         shell: powershell
-        run: Start-Sleep -Seconds 16200
+        run: |
+          $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
+          $tsIP = (& $tsExe ip -4).Trim()
+          
+          Write-Host "⏰ Session active for 4h 30min..."
+          Write-Host "💡 File share: \\$tsIP\Transfer"
+          Write-Host "💡 Exit node: tailscale up --exit-node=$tsIP"
+          
+          for ($i = 1; $i -le 270; $i++) {
+            if ($i % 30 -eq 0) {
+              Write-Host "⏳ ${i}min elapsed - Share: \\$tsIP\Transfer"
+              
+              # Verify Tailscale still connected
+              $status = & $tsExe status 2>&1
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "⚠️  Warning: Tailscale may be disconnected"
+              }
+            }
+            Start-Sleep -Seconds 60
+          }
+          
+          Write-Host "Session completed"
 
       # ─────────────────────────────────────────
       # BACKUP
@@ -237,12 +402,24 @@ jobs:
         run: |
           Write-Host "Starting backup..."
           New-Item -ItemType Directory -Force -Path "backup" | Out-Null
+          
+          # Also backup shared transfer folder
+          if (Test-Path "C:\Transfer") {
+            $transferItems = Get-ChildItem "C:\Transfer" -ErrorAction SilentlyContinue
+            if ($transferItems) {
+              Write-Host "Backing up Transfer folder..."
+              Compress-Archive -Path "C:\Transfer\*" `
+                -DestinationPath "backup\transfer.zip" -Force
+            }
+          }
+          
           $items = @(
             "C:\Users\kavishka\Desktop",
             "C:\Users\kavishka\Documents",
             "C:\Users\kavishka\Downloads"
           )
           $existing = $items | Where-Object { Test-Path $_ }
+          
           if ($existing.Count -gt 0) {
             Compress-Archive -Path $existing `
               -DestinationPath "backup\userdata.zip" -Force
@@ -255,7 +432,7 @@ jobs:
       - name: Push backup to GitHub
         shell: bash
         run: |
-          git add backup/userdata.zip rdp-info.txt 2>/dev/null || true
+          git add backup/ rdp-info.txt 2>/dev/null || true
           git diff --staged --quiet || \
             git commit -m "Auto backup - $(date '+%Y-%m-%d %H:%M:%S UTC')"
           git push origin HEAD || true
@@ -268,6 +445,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
-          gh workflow run rdp.yml
+          gh workflow run "${{ github.workflow }}"
           echo "Next session triggered!"
           echo "Windows RDP ready again in about 3 minutes!"
