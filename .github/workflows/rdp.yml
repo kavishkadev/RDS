@@ -11,32 +11,12 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      # ─────────────────────────────────────────
-      # SYSTEM OPTIMIZATION
-      # ─────────────────────────────────────────
-      - name: ⚡ Optimize system performance
+      - name: ⚡ Optimize system
         run: |
-          sudo systemctl disable --now apport unattended-upgrades \
-            apt-daily.timer apt-daily-upgrade.timer \
-            motd-news.timer fwupd 2>/dev/null || true
+          sudo systemctl disable --now apport unattended-upgrades 2>/dev/null || true
+          sudo swapoff -a || true
 
-          sudo sysctl -w vm.swappiness=10
-          sudo sysctl -w vm.vfs_cache_pressure=50
-          sudo sysctl -w net.core.rmem_max=134217728
-          sudo sysctl -w net.core.wmem_max=134217728
-
-          sudo swapoff -a
-          sudo rm -f /swapfile
-          sudo dd if=/dev/zero of=/swapfile bs=1M count=4096 status=progress
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          echo "✅ Swap created: $(free -h | grep Swap)"
-
-      # ─────────────────────────────────────────
-      # CHECKOUT & GIT CONFIG
-      # ─────────────────────────────────────────
-      - name: 📦 Checkout repo
+      - name: 📦 Checkout
         uses: actions/checkout@v3
         with:
           token: ${{ secrets.GH_PAT }}
@@ -45,192 +25,73 @@ jobs:
       - name: 🔧 Configure Git
         run: |
           git config user.name "RDP Bot"
-          git config user.email "rdpbot@github.com"
+          git config user.email "rdp@github.com"
 
-      # ─────────────────────────────────────────
-      # CREATE USER
-      # ─────────────────────────────────────────
-      - name: 👤 Create RDP user
+      - name: 👤 Create user
         run: |
           sudo useradd -m -s /bin/bash kavishka
           echo "kavishka:${{ secrets.RDP_PASSWORD }}" | sudo chpasswd
           sudo usermod -aG sudo kavishka
-          sudo usermod -aG audio,video kavishka
 
-      # ─────────────────────────────────────────
-      # RESTORE BACKUP
-      # ─────────────────────────────────────────
-      - name: 💾 Restore previous session data
+      - name: 💾 Restore backup
         run: |
           if [ -f "backup/kavishka-backup.tar.gz" ]; then
-            echo "✅ Backup found! Restoring..."
             sudo tar -xzf backup/kavishka-backup.tar.gz -C /home/kavishka/
             sudo chown -R kavishka:kavishka /home/kavishka/
-            echo "✅ Restore complete! Size: $(du -sh /home/kavishka | cut -f1)"
-          else
-            echo "⚠️ No backup found. Starting fresh."
           fi
 
-      # ─────────────────────────────────────────
-      # INSTALL PACKAGES
-      # ─────────────────────────────────────────
-      - name: 📥 Install XFCE + XRDP + Tools
+      - name: 📥 Install XFCE + XRDP
         run: |
           sudo apt update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt install -y \
-            xfce4 \
-            xfce4-goodies \
-            xfce4-terminal \
-            xrdp \
-            xorgxrdp \
-            dbus-x11 \
-            pulseaudio \
-            firefox \
-            wget \
-            curl \
-            git \
-            htop \
-            neofetch \
-            unzip \
-            zip \
-            python3 \
-            python3-pip \
-            nodejs \
-            npm \
-            fonts-noto \
+            xfce4 xfce4-goodies xrdp xorgxrdp firefox wget curl \
             --no-install-recommends
-          echo "✅ All packages installed!"
 
-      # ─────────────────────────────────────────
-      # CONFIGURE XRDP
-      # ─────────────────────────────────────────
       - name: 🚀 Configure XRDP
         run: |
-          sudo pkill -9 xrdp || true
-          sudo pkill -9 xrdp-sesman || true
-          sleep 2
-          
           echo "startxfce4" | sudo tee /home/kavishka/.xsession > /dev/null
           sudo chown kavishka:kavishka /home/kavishka/.xsession
-          sudo chmod 644 /home/kavishka/.xsession
-          
           sudo xrdp || true
           sudo xrdp-sesman || true
-          
           sleep 3
-          
-          echo "=== XRDP Status ==="
-          ps aux | grep xrdp | grep -v grep
-          sudo ss -tlnp | grep 3389 || echo "⚠️ Port 3389 not found"
 
-      # ─────────────────────────────────────────
-      # TCP TUNNEL (FIXED - USING CHISEL)
-      # ─────────────────────────────────────────
-      - name: 🌐 Setup TCP Tunnel (chisel)
+      - name: 🌐 Cloudflare Tunnel
+        env:
+          CF_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
         run: |
-          # Download chisel (reliable TCP tunnel)
-          wget -q https://github.com/jpillora/chisel/releases/latest/download/chisel_linux_amd64.gz
-          gunzip chisel_linux_amd64.gz
-          chmod +x chisel_linux_amd64
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
           
-          echo "🚀 Starting chisel TCP tunnel..."
-          # Start chisel client to a public server
-          ./chisel_linux_amd64 client chisel.ajay.app:443 R:3389:localhost:3389 > /tmp/chisel.log 2>&1 &
+          cloudflared tunnel --no-autoupdate run --token $CF_TOKEN > /tmp/cf.log 2>&1 &
+          sleep 10
           
-          sleep 8
-          
-          echo "========================================"
-          echo "  📜 TUNNEL STATUS"
-          echo "========================================"
-          cat /tmp/chisel.log || echo "No log yet"
-          echo "========================================"
-          
-          # Check if process is running
-          if pgrep -f "chisel_linux_amd64" > /dev/null; then
-            echo "✅ Chisel tunnel is running!"
-            echo "🌐 Connect to: chisel.ajay.app:443"
-            echo "TUNNEL_ADDR=chisel.ajay.app" >> $GITHUB_ENV
-            echo "TUNNEL_PORT=443" >> $GITHUB_ENV
-          else
-            echo "❌ Chisel failed to start"
-            echo "💡 Try Cloudflare Tunnel instead"
-            echo "TUNNEL_ADDR=FAILED" >> $GITHUB_ENV
-            echo "TUNNEL_PORT=0" >> $GITHUB_ENV
-          fi
+          echo "✅ Tunnel started! Check Cloudflare dashboard for hostname"
 
-      # ─────────────────────────────────────────
-      # SHOW CONNECTION INFO
-      # ─────────────────────────────────────────
       - name: 📋 Connection Info
         run: |
           echo "========================================"
-          echo "  🖥️  RDP CONNECTION DETAILS"
+          echo "  ✅ RDP READY!"
           echo "========================================"
-          echo "  🌐 SERVER    : ${{ env.TUNNEL_ADDR }}"
-          echo "  🔌 PORT      : ${{ env.TUNNEL_PORT }}"
-          echo "  👤 USERNAME  : kavishka"
-          echo "  🔑 PASSWORD  : (from secrets)"
-          echo "========================================"
-          echo "  💡 Windows:"
-          echo "     Win+R → mstsc"
-          echo "     Computer: ${{ env.TUNNEL_ADDR }}:${{ env.TUNNEL_PORT }}"
+          echo "  👤 Username: kavishka"
+          echo "  🔑 Password: ${{ secrets.RDP_PASSWORD }}"
           echo ""
-          echo "  💡 Linux:"
-          echo "     xfreerdp /v:${{ env.TUNNEL_ADDR }}:${{ env.TUNNEL_PORT }} /u:kavishka"
-          echo "========================================"
-          echo "  ⚠️ Username is 'kavishka' (case-sensitive)"
-          echo "========================================"
-          echo "  XRDP: $(pgrep -x xrdp > /dev/null && echo '✅ Running' || echo '❌ Stopped')"
-          echo "  RAM: $(free -h | grep Mem | awk '{print $3"/"$2}')"
-          echo "  CPU: $(nproc) cores"
+          echo "  🌐 Open https://dash.teams.cloudflare.com/"
+          echo "     to see your tunnel hostname"
           echo "========================================"
 
-      # ─────────────────────────────────────────
-      # SESSION (4h 30min then backup)
-      # ─────────────────────────────────────────
-      - name: ⏳ Active session (4h 30min)
+      - name: ⏳ Keep alive
         run: sleep 16200
 
-      # ─────────────────────────────────────────
-      # BACKUP TO REPO
-      # ─────────────────────────────────────────
-      - name: 💾 Backup user data to repo
+      - name: 💾 Backup
         run: |
-          echo "💾 Starting backup..."
           mkdir -p backup
+          sudo tar -czf backup/kavishka-backup.tar.gz -C /home/kavishka . \
+            --exclude='.cache' --exclude='*.log' 2>/dev/null
+          git add backup/
+          git commit -m "Backup $(date +%Y-%m-%d)" || true
+          git push origin HEAD || true
 
-          sudo tar -czf backup/kavishka-backup.tar.gz \
-            -C /home/kavishka . \
-            --exclude='.cache' \
-            --exclude='.mozilla/firefox/*/cache2' \
-            --exclude='*.log' \
-            --exclude='.local/share/recently-used.xbel' \
-            --exclude='__pycache__' \
-            --exclude='node_modules' \
-            --exclude='.npm' \
-            2>/dev/null
-
-          BACKUP_SIZE=$(du -sh backup/kavishka-backup.tar.gz | cut -f1)
-          echo "✅ Backup complete! Size: $BACKUP_SIZE"
-
-      - name: 📤 Push backup to GitHub
-        run: |
-          git add backup/kavishka-backup.tar.gz
-          if git diff --staged --quiet; then
-            echo "⚠️ No changes to backup."
-          else
-            git commit -m "💾 Auto backup - $(date '+%Y-%m-%d %H:%M:%S UTC')"
-            git push origin HEAD
-            echo "✅ Backup pushed successfully!"
-          fi
-
-      # ─────────────────────────────────────────
-      # TRIGGER NEXT RUN
-      # ─────────────────────────────────────────
-      - name: 🔄 Trigger next session
+      - name: 🔄 Trigger next
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: |
-          gh workflow run rdp.yml
-          echo "✅ Next session triggered!"
-          echo "⏳ New RDP ready in ~3 minutes..."
+        run: gh workflow run rdp.yml
