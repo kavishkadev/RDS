@@ -17,11 +17,11 @@ jobs:
       - name: System Info
         shell: powershell
         run: |
-          Write-Host "========================================"
           $os = (Get-WmiObject Win32_OperatingSystem).Caption
+          $ram = [math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB, 2)
+          Write-Host "========================================"
           Write-Host "Windows: $os"
           Write-Host "CPU Cores: $env:NUMBER_OF_PROCESSORS"
-          $ram = [math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB, 2)
           Write-Host "RAM: $ram GB"
           Write-Host "========================================"
 
@@ -46,29 +46,50 @@ jobs:
       - name: Create user kavishka
         shell: powershell
         run: |
-          # Use net user - more reliable than New-LocalUser
           $pass = "${{ secrets.RDP_PASSWORD }}"
+          $secPass = ConvertTo-SecureString $pass -AsPlainText -Force
 
-          # Check if user exists
-          $exists = net user kavishka 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "User exists. Updating password..."
-            net user kavishka $pass
-          } else {
-            Write-Host "Creating user kavishka..."
-            net user kavishka $pass /add /y
+          # Check if user exists using Get-LocalUser
+          $userExists = $false
+          try {
+            Get-LocalUser -Name "kavishka" -ErrorAction Stop | Out-Null
+            $userExists = $true
+          } catch {
+            $userExists = $false
           }
 
-          # Add to groups
-          net localgroup Administrators kavishka /add 2>$null
-          net localgroup "Remote Desktop Users" kavishka /add 2>$null
+          if ($userExists) {
+            Write-Host "User kavishka exists. Updating password..."
+            Set-LocalUser -Name "kavishka" -Password $secPass -ErrorAction Stop
+          } else {
+            Write-Host "Creating user kavishka..."
+            New-LocalUser `
+              -Name "kavishka" `
+              -Password $secPass `
+              -FullName "Kavishka" `
+              -Description "RDP User" `
+              -PasswordNeverExpires `
+              -ErrorAction Stop
+          }
 
-          # Never expire password
-          net user kavishka /expires:never
-          wmic useraccount where "name='kavishka'" set PasswordExpires=FALSE
+          # Add to groups safely
+          try {
+            Add-LocalGroupMember -Group "Administrators" -Member "kavishka" -ErrorAction Stop
+            Write-Host "Added to Administrators"
+          } catch {
+            Write-Host "Already in Administrators or error: $_"
+          }
 
-          Write-Host "User kavishka created successfully!"
-          net user kavishka
+          try {
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member "kavishka" -ErrorAction Stop
+            Write-Host "Added to Remote Desktop Users"
+          } catch {
+            Write-Host "Already in Remote Desktop Users or error: $_"
+          }
+
+          # Enable account
+          Enable-LocalUser -Name "kavishka"
+          Write-Host "User kavishka is ready!"
 
       # ─────────────────────────────────────────
       # RESTORE BACKUP
@@ -78,10 +99,9 @@ jobs:
         run: |
           if (Test-Path "backup\userdata.zip") {
             Write-Host "Backup found! Restoring..."
-            New-Item -ItemType Directory -Force -Path "C:\Users\kavishka\" | Out-Null
+            New-Item -ItemType Directory -Force -Path "C:\Users\kavishka" | Out-Null
             Expand-Archive -Path "backup\userdata.zip" `
-              -DestinationPath "C:\Users\kavishka\" `
-              -Force
+              -DestinationPath "C:\Users\kavishka\" -Force
             Write-Host "Restore complete!"
           } else {
             Write-Host "No backup found. Starting fresh."
@@ -94,30 +114,25 @@ jobs:
         shell: powershell
         run: |
           # Enable Remote Desktop
-          Set-ItemProperty -Path `
-            'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
             -Name "fDenyTSConnections" -Value 0
 
-          # Disable NLA (Network Level Authentication)
-          # This makes connecting easier without certificate issues
-          Set-ItemProperty -Path `
-            'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+          # Disable NLA for easier connection
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "UserAuthentication" -Value 0
 
-          Set-ItemProperty -Path `
-            'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "SecurityLayer" -Value 0
 
-          # Enable RDP firewall rules
+          # Enable firewall rules
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
           # Start RDP service
           Set-Service -Name TermService -StartupType Automatic
           Start-Service -Name TermService
-
-          # Allow kavishka user through local policy
-          $sid = (Get-LocalUser -Name "kavishka").SID.Value
-          Write-Host "kavishka SID: $sid"
 
           Write-Host "RDP Enabled!"
           Write-Host "RDP Service: $((Get-Service TermService).Status)"
@@ -129,7 +144,6 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Downloading Tailscale..."
-
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
           $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
@@ -139,25 +153,24 @@ jobs:
           Write-Host "Download complete. Installing..."
 
           $proc = Start-Process -FilePath $out `
-            -ArgumentList "/S" `
-            -Wait -PassThru -NoNewWindow
-
+            -ArgumentList "/S" -Wait -PassThru -NoNewWindow
           Write-Host "Installer exit code: $($proc.ExitCode)"
+
           Start-Sleep -Seconds 15
 
-          # Verify
           $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
           if (Test-Path $tsPath) {
-            Write-Host "Tailscale installed OK at $tsPath"
+            Write-Host "Tailscale installed at $tsPath"
           } else {
-            Write-Host "Searching for tailscale..."
-            $found = Get-ChildItem -Path "C:\Program Files\" `
+            Write-Host "Searching alternate path..."
+            $found = Get-ChildItem "C:\Program Files\" `
               -Recurse -Filter "tailscale.exe" -ErrorAction SilentlyContinue |
               Select-Object -First 1
             if ($found) {
-              Write-Host "Found at: $($found.FullName)"
+              Write-Host "Found: $($found.FullName)"
             } else {
               Write-Host "ERROR: tailscale.exe not found!"
+              exit 1
             }
           }
 
@@ -167,32 +180,25 @@ jobs:
       - name: Connect Tailscale
         shell: powershell
         run: |
-          # Find tailscale exe
           $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
           if (-not (Test-Path $tsExe)) {
-            $tsExe = (Get-ChildItem -Path "C:\" -Recurse `
-              -Filter "tailscale.exe" `
-              -ErrorAction SilentlyContinue |
-              Select-Object -First 1).FullName
+            $tsExe = (Get-ChildItem "C:\" -Recurse -Filter "tailscale.exe" `
+              -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
           }
-          Write-Host "Tailscale path: $tsExe"
+          Write-Host "Tailscale: $tsExe"
 
-          # Connect
           $tsKey = "${{ secrets.TS_AUTHKEY }}"
           & $tsExe up --authkey=$tsKey --hostname="github-rdp" --accept-routes
           Start-Sleep -Seconds 15
 
-          # Get IP
           $tsIP = (& $tsExe ip -4).Trim()
           Write-Host "========================================"
           Write-Host "Tailscale Connected!"
-          Write-Host "YOUR FIXED RDP IP: $tsIP"
+          Write-Host "FIXED RDP IP: $tsIP"
           Write-Host "USERNAME: kavishka"
           Write-Host "PASSWORD: your RDP_PASSWORD secret"
-          Write-Host "Open mstsc -> Computer: $tsIP"
           Write-Host "========================================"
 
-          # Save info
           Set-Content  -Path "rdp-info.txt" -Value "RDP_IP=$tsIP"
           Add-Content  -Path "rdp-info.txt" -Value "USERNAME=kavishka"
           Add-Content  -Path "rdp-info.txt" -Value "PORT=3389"
