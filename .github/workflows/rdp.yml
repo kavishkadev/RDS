@@ -1,4 +1,4 @@
-name: Kavishka
+name: Kavishka RDP
 
 on:
   workflow_dispatch:
@@ -11,21 +11,11 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      - name: ⚡ Optimize system
-        run: |
-          sudo systemctl disable --now apport unattended-upgrades 2>/dev/null || true
-          sudo swapoff -a || true
-
       - name: 📦 Checkout
         uses: actions/checkout@v3
         with:
           token: ${{ secrets.GH_PAT }}
           fetch-depth: 0
-
-      - name: 🔧 Configure Git
-        run: |
-          git config user.name "RDP Bot"
-          git config user.email "rdp@github.com"
 
       - name: 👤 Create user
         run: |
@@ -33,81 +23,52 @@ jobs:
           echo "kavishka:${{ secrets.RDP_PASSWORD }}" | sudo chpasswd
           sudo usermod -aG sudo kavishka
 
-      - name: 💾 Restore backup
-        run: |
-          if [ -f "backup/kavishka-backup.tar.gz" ]; then
-            sudo tar -xzf backup/kavishka-backup.tar.gz -C /home/kavishka/
-            sudo chown -R kavishka:kavishka /home/kavishka/
-          fi
-
-      - name: 📥 Install XFCE + XRDP
+      - name: 📥 Install XRDP
         run: |
           sudo apt update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt install -y \
-            xfce4 xfce4-goodies xrdp xorgxrdp firefox wget curl \
-            --no-install-recommends
-
-      - name: 🚀 Configure XRDP
-        run: |
+            xfce4 xfce4-goodies xrdp xorgxrdp --no-install-recommends
           echo "startxfce4" | sudo tee /home/kavishka/.xsession > /dev/null
           sudo chown kavishka:kavishka /home/kavishka/.xsession
+
+      - name: 🚀 Start XRDP
+        run: |
           sudo xrdp || true
           sudo xrdp-sesman || true
           sleep 3
 
-      - name: 🌐 Start Cloudflare Quick Tunnel
+      - name: 🌐 Cloudflare Tunnel
+        env:
+          CF_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
         run: |
-          # Download cloudflared
           wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
           sudo dpkg -i cloudflared-linux-amd64.deb
-          
-          # Start tunnel WITHOUT token (quick tunnel)
-          cloudflared tunnel --url tcp://localhost:3389 > /tmp/cf.log 2>&1 &
-          
-          sleep 10
-          
-          echo "========================================"
-          echo "  📜 TUNNEL LOG"
-          echo "========================================"
-          cat /tmp/cf.log
-          echo "========================================"
-          
-          # Extract the auto-generated URL
-          TUNNEL_URL=$(grep -oP 'https://\K[^\s]+' /tmp/cf.log | head -1)
-          
-          if [ -n "$TUNNEL_URL" ]; then
-            echo "✅ Tunnel URL: $TUNNEL_URL"
-            echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
-          else
-            echo "⚠️ Could not extract URL"
-          fi
+          cloudflared tunnel run --token $CF_TOKEN > /tmp/cf.log 2>&1 &
+          sleep 15
+          echo "✅ Tunnel started"
 
       - name: 📋 Connection Info
         run: |
           echo "========================================"
-          echo "  🖥️  RDP CONNECTION DETAILS"
+          echo "  ✅ RDP READY!"
           echo "========================================"
-          echo "  🌐 SERVER    : ${{ env.TUNNEL_URL }}"
-          echo "  👤 USERNAME  : kavishka"
-          echo "  🔑 PASSWORD  : (from secrets)"
-          echo "========================================"
-          echo "  💡 Copy the SERVER address above"
-          echo "     and use it in your RDP client!"
-          echo "========================================"
-          echo "  XRDP: $(pgrep -x xrdp > /dev/null && echo '✅ Running' || echo '❌ Stopped')"
+          echo "  👤 Username: kavishka"
+          echo "  🔑 Password: ${{ secrets.RDP_PASSWORD }}"
+          echo ""
+          echo "  🌐 ADD ROUTE IN CLOUDFLARE:"
+          echo "     1. Go to your tunnel → Routes tab"
+          echo "     2. Add route:"
+          echo "        - Subdomain: rdp"
+          echo "        - Domain: trycloudflare.com (TYPE IT MANUALLY)"
+          echo "        - Type: TCP"
+          echo "        - URL: localhost:3389"
+          echo "     3. Save"
+          echo ""
+          echo "  Then connect to: rdp.trycloudflare.com"
           echo "========================================"
 
-      - name: ⏳ Keep alive (4h 30min)
+      - name: ⏳ Keep alive
         run: sleep 16200
-
-      - name: 💾 Backup
-        run: |
-          mkdir -p backup
-          sudo tar -czf backup/kavishka-backup.tar.gz -C /home/kavishka . \
-            --exclude='.cache' --exclude='*.log' 2>/dev/null
-          git add backup/
-          git commit -m "Backup $(date +%Y-%m-%d)" || true
-          git push origin HEAD || true
 
       - name: 🔄 Trigger next
         env:
