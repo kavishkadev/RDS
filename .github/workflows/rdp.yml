@@ -46,35 +46,29 @@ jobs:
       - name: Create user kavishka
         shell: powershell
         run: |
+          # Use net user - more reliable than New-LocalUser
           $pass = "${{ secrets.RDP_PASSWORD }}"
-          $secPass = ConvertTo-SecureString $pass -AsPlainText -Force
 
-          # Check if user already exists
-          $userExists = Get-LocalUser -Name "kavishka" -ErrorAction SilentlyContinue
-
-          if ($userExists) {
-            Write-Host "User kavishka exists. Updating password..."
-            Set-LocalUser -Name "kavishka" -Password $secPass
+          # Check if user exists
+          $exists = net user kavishka 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "User exists. Updating password..."
+            net user kavishka $pass
           } else {
             Write-Host "Creating user kavishka..."
-            New-LocalUser -Name "kavishka" `
-              -Password $secPass `
-              -FullName "Kavishka" `
-              -Description "RDP User" `
-              -PasswordNeverExpires
+            net user kavishka $pass /add /y
           }
 
-          # Add to Administrators and Remote Desktop Users groups
-          Add-LocalGroupMember -Group "Administrators" `
-            -Member "kavishka" -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" `
-            -Member "kavishka" -ErrorAction SilentlyContinue
+          # Add to groups
+          net localgroup Administrators kavishka /add 2>$null
+          net localgroup "Remote Desktop Users" kavishka /add 2>$null
 
-          # Enable the account
-          Enable-LocalUser -Name "kavishka"
+          # Never expire password
+          net user kavishka /expires:never
+          wmic useraccount where "name='kavishka'" set PasswordExpires=FALSE
 
-          Write-Host "User kavishka ready!"
-          Write-Host "Groups: $(Get-LocalGroup | Where-Object { (Get-LocalGroupMember $_ -ErrorAction SilentlyContinue).Name -like '*kavishka*' } | Select-Object -ExpandProperty Name)"
+          Write-Host "User kavishka created successfully!"
+          net user kavishka
 
       # ─────────────────────────────────────────
       # RESTORE BACKUP
