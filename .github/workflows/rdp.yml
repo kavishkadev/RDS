@@ -41,73 +41,53 @@ jobs:
           git config user.email "rdpbot@github.com"
 
       # ─────────────────────────────────────────
-      # DISABLE PASSWORD POLICY FIRST
+      # DISABLE PASSWORD POLICY
       # ─────────────────────────────────────────
       - name: Disable password policy
         shell: powershell
         run: |
-          Write-Host "Disabling password complexity policy..."
-
-          # Export current security policy
+          Write-Host "Disabling password complexity..."
           secedit /export /cfg C:\secpol.cfg /quiet
-
-          # Read and modify
           $content = Get-Content C:\secpol.cfg
-
-          # Disable complexity
-          $content = $content -replace "PasswordComplexity\s*=\s*\d", "PasswordComplexity = 0"
-          # Set minimum length to 1
+          $content = $content -replace "PasswordComplexity\s*=\s*\d",    "PasswordComplexity = 0"
           $content = $content -replace "MinimumPasswordLength\s*=\s*\d+", "MinimumPasswordLength = 1"
-          # Disable password history
-          $content = $content -replace "PasswordHistorySize\s*=\s*\d+", "PasswordHistorySize = 0"
-          # Set max password age to 0 (never expires)
-          $content = $content -replace "MaximumPasswordAge\s*=\s*\d+", "MaximumPasswordAge = -1"
-
-          # Save modified policy
+          $content = $content -replace "PasswordHistorySize\s*=\s*\d+",   "PasswordHistorySize = 0"
+          $content = $content -replace "MaximumPasswordAge\s*=\s*\d+",    "MaximumPasswordAge = -1"
           $content | Set-Content C:\secpol.cfg
-
-          # Apply the modified policy
           secedit /configure /db C:\Windows\security\local.sdb /cfg C:\secpol.cfg /quiet
-
           Write-Host "Password policy disabled!"
 
       # ─────────────────────────────────────────
-      # CREATE USER KAVISHKA
+      # CREATE USER KAVISHKA (using cmd shell)
       # ─────────────────────────────────────────
       - name: Create user kavishka
-        shell: powershell
+        shell: cmd
         run: |
-          $pass = "${{ secrets.RDP_PASSWORD }}"
+          echo Deleting old user if exists...
+          net user kavishka /delete >nul 2>&1
 
-          Write-Host "Creating user kavishka..."
+          echo Creating user kavishka...
+          net user kavishka "${{ secrets.RDP_PASSWORD }}" /add /y
+          if %errorlevel% neq 0 (
+            echo FAILED to create user!
+            exit /b 1
+          )
 
-          # Delete if exists to start fresh
-          net user kavishka /delete 2>$null
-          Start-Sleep -Seconds 2
+          echo Adding to Administrators...
+          net localgroup Administrators kavishka /add >nul 2>&1
 
-          # Create user
-          net user kavishka $pass /add /y
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "ERROR: Failed to create user! Exit: $LASTEXITCODE"
-            exit 1
-          }
-          Write-Host "User created!"
+          echo Adding to Remote Desktop Users...
+          net localgroup "Remote Desktop Users" kavishka /add >nul 2>&1
 
-          # Add to groups
-          net localgroup Administrators kavishka /add /y
-          net localgroup "Remote Desktop Users" kavishka /add /y
+          echo Setting account to never expire...
+          net user kavishka /expires:never >nul 2>&1
+          net user kavishka /active:yes >nul 2>&1
+          wmic useraccount where "name='kavishka'" set PasswordExpires=FALSE >nul 2>&1
 
-          # Set account to never expire
-          net user kavishka /expires:never
-          net user kavishka /active:yes
-
-          # Disable password expiry via wmic
-          wmic useraccount where "name='kavishka'" set PasswordExpires=FALSE
-
-          Write-Host "========================================"
-          Write-Host "User kavishka setup complete!"
+          echo ========================================
+          echo User kavishka created successfully!
+          echo ========================================
           net user kavishka
-          Write-Host "========================================"
 
       # ─────────────────────────────────────────
       # RESTORE BACKUP
@@ -131,12 +111,10 @@ jobs:
       - name: Enable RDP
         shell: powershell
         run: |
-          # Enable Remote Desktop
           Set-ItemProperty `
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
             -Name "fDenyTSConnections" -Value 0
 
-          # Disable NLA
           Set-ItemProperty `
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "UserAuthentication" -Value 0
@@ -145,10 +123,8 @@ jobs:
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "SecurityLayer" -Value 0
 
-          # Enable firewall rules
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
-          # Start RDP service
           Set-Service -Name TermService -StartupType Automatic
           Start-Service -Name TermService
 
@@ -163,31 +139,18 @@ jobs:
         run: |
           Write-Host "Downloading Tailscale..."
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
           $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
           $out = Join-Path $env:TEMP "tailscale-setup.exe"
-
           Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
-          Write-Host "Download complete. Installing..."
-
-          $proc = Start-Process -FilePath $out `
-            -ArgumentList "/S" -Wait -PassThru -NoNewWindow
-          Write-Host "Installer exit code: $($proc.ExitCode)"
+          Write-Host "Installing..."
+          $proc = Start-Process -FilePath $out -ArgumentList "/S" -Wait -PassThru -NoNewWindow
+          Write-Host "Exit code: $($proc.ExitCode)"
           Start-Sleep -Seconds 15
-
-          $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
-          if (Test-Path $tsPath) {
+          if (Test-Path "C:\Program Files\Tailscale\tailscale.exe") {
             Write-Host "Tailscale installed OK!"
           } else {
-            $found = Get-ChildItem "C:\Program Files\" `
-              -Recurse -Filter "tailscale.exe" -ErrorAction SilentlyContinue |
-              Select-Object -First 1
-            if ($found) {
-              Write-Host "Found at: $($found.FullName)"
-            } else {
-              Write-Host "ERROR: tailscale.exe not found!"
-              exit 1
-            }
+            Write-Host "ERROR: Tailscale not found!"
+            exit 1
           }
 
       # ─────────────────────────────────────────
@@ -197,23 +160,19 @@ jobs:
         shell: powershell
         run: |
           $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
-          if (-not (Test-Path $tsExe)) {
-            $tsExe = (Get-ChildItem "C:\" -Recurse -Filter "tailscale.exe" `
-              -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-          }
-          Write-Host "Tailscale: $tsExe"
-
           $tsKey = "${{ secrets.TS_AUTHKEY }}"
+
           & $tsExe up --authkey=$tsKey --hostname="github-rdp" --accept-routes
           Start-Sleep -Seconds 15
 
           $tsIP = (& $tsExe ip -4).Trim()
+
           Write-Host "========================================"
-          Write-Host "Tailscale Connected!"
-          Write-Host "FIXED RDP IP : $tsIP"
-          Write-Host "USERNAME     : kavishka"
-          Write-Host "PASSWORD     : your RDP_PASSWORD secret"
-          Write-Host "PORT         : 3389"
+          Write-Host "  Tailscale Connected!"
+          Write-Host "  FIXED RDP IP : $tsIP"
+          Write-Host "  USERNAME     : kavishka"
+          Write-Host "  PASSWORD     : your RDP_PASSWORD secret"
+          Write-Host "  PORT         : 3389"
           Write-Host "========================================"
 
           Set-Content -Path "rdp-info.txt" -Value "RDP_IP=$tsIP"
@@ -242,7 +201,6 @@ jobs:
           $tsIP  = (& $tsExe ip -4).Trim()
           $ram   = [math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB, 2)
           $disk  = [math]::Round((Get-PSDrive C).Free/1GB, 2)
-
           Write-Host "========================================"
           Write-Host "  WINDOWS RDP - READY TO CONNECT"
           Write-Host "========================================"
@@ -279,15 +237,12 @@ jobs:
         run: |
           Write-Host "Starting backup..."
           New-Item -ItemType Directory -Force -Path "backup" | Out-Null
-
           $items = @(
             "C:\Users\kavishka\Desktop",
             "C:\Users\kavishka\Documents",
             "C:\Users\kavishka\Downloads"
           )
-
           $existing = $items | Where-Object { Test-Path $_ }
-
           if ($existing.Count -gt 0) {
             Compress-Archive -Path $existing `
               -DestinationPath "backup\userdata.zip" -Force
