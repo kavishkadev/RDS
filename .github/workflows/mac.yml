@@ -72,12 +72,33 @@ jobs:
           echo "SSH enabled!"
 
       # ─────────────────────────────────────────
-      # ENABLE VNC SCREEN SHARING
+      # ENABLE VNC SCREEN SHARING (fixed auth)
       # ─────────────────────────────────────────
       - name: Enable Screen Sharing VNC
         run: |
-          echo "Enabling VNC..."
+          echo "Enabling VNC with legacy auth..."
 
+          # Stop any existing ARD first
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -deactivate -stop 2>/dev/null || true
+          sleep 3
+
+          # Set VNC password using Python (most reliable method)
+          sudo python3 -c "
+          import subprocess
+          password = '${{ secrets.VNC_PASSWORD }}'
+          result = subprocess.run([
+            '/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart',
+            '-configure',
+            '-clientopts', '-setvnclegacy', '-vnclegacy', 'yes',
+            '-clientopts', '-setvncpw', '-vncpw', password
+          ], capture_output=True, text=True)
+          print('stdout:', result.stdout)
+          print('stderr:', result.stderr)
+          print('VNC password configured!')
+          " 2>/dev/null || true
+
+          # Enable screen sharing with all users
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure \
@@ -89,27 +110,41 @@ jobs:
             -restart -agent \
             2>/dev/null || true
 
+          # Enable via launchctl
           sudo launchctl load -w \
             /System/Library/LaunchDaemons/com.apple.screensharing.plist \
             2>/dev/null || true
 
+          # Extra: set via defaults
+          sudo defaults write \
+            /Library/Preferences/com.apple.RemoteManagement \
+            VNCAlwaysStartOnConsole -bool true 2>/dev/null || true
+
           sleep 5
           echo "VNC enabled!"
-          sudo lsof -i :5900 2>/dev/null | head -5 || echo "Port 5900 checked"
+          echo "Port 5900 status:"
+          sudo lsof -i :5900 2>/dev/null | head -5 || echo "Checked"
+
+      # ─────────────────────────────────────────
+      # INSTALL TOOLS
+      # ─────────────────────────────────────────
+      - name: Install useful tools
+        run: |
+          brew install --quiet wget curl htop 2>/dev/null || true
+          echo "Tools ready!"
 
       # ─────────────────────────────────────────
       # INSTALL TAILSCALE
       # ─────────────────────────────────────────
       - name: Install Tailscale
         run: |
-          echo "Installing Tailscale via brew..."
+          echo "Installing Tailscale..."
           brew install tailscale
           echo "Version: $(tailscale version)"
-          echo "Path: $(which tailscale)"
           echo "Tailscale installed!"
 
       # ─────────────────────────────────────────
-      # CONNECT TAILSCALE (no --socket flag)
+      # CONNECT TAILSCALE
       # ─────────────────────────────────────────
       - name: Connect Tailscale
         run: |
@@ -117,12 +152,14 @@ jobs:
           sudo pkill -9 tailscaled 2>/dev/null || true
           sleep 3
 
-          # Find brew tailscaled path
+          # Find paths
           TAILSCALED=$(which tailscaled 2>/dev/null || \
-            find /opt/homebrew /usr/local -name "tailscaled" 2>/dev/null | head -1)
+            find /opt/homebrew /usr/local \
+            -name "tailscaled" 2>/dev/null | head -1)
           TAILSCALE=$(which tailscale 2>/dev/null || \
-            find /opt/homebrew /usr/local -name "tailscale" \
-            -not -name "tailscaled" 2>/dev/null | head -1)
+            find /opt/homebrew /usr/local \
+            -name "tailscale" -not -name "tailscaled" \
+            2>/dev/null | head -1)
 
           echo "tailscaled: $TAILSCALED"
           echo "tailscale : $TAILSCALE"
@@ -130,17 +167,17 @@ jobs:
           # Create state dir
           sudo mkdir -p /var/lib/tailscale
 
-          # Start tailscaled (NO --socket flag for brew version)
+          # Start daemon (no --socket flag)
           echo "Starting tailscaled..."
           sudo "$TAILSCALED" \
             --state=/var/lib/tailscale/tailscaled.state \
             > /tmp/tailscaled.log 2>&1 &
 
-          echo "Waiting for tailscaled to start..."
+          echo "Waiting for daemon..."
           sleep 10
 
-          # Connect (NO --socket flag)
-          echo "Connecting to Tailscale..."
+          # Connect (no --socket flag)
+          echo "Connecting..."
           sudo "$TAILSCALE" up \
             --authkey="${{ secrets.TS_AUTHKEY_MAC }}" \
             --hostname="github-macos-vnc" \
@@ -148,13 +185,11 @@ jobs:
             --timeout=30s \
             > /tmp/tsup.log 2>&1
 
-          echo "tailscale up exit: $?"
+          echo "Exit code: $?"
           cat /tmp/tsup.log || true
-
           sleep 5
 
-          # Get IP (NO --socket flag)
-          echo "Getting IP..."
+          # Get IP
           TS_IP=""
           for i in {1..20}; do
             sleep 3
@@ -170,9 +205,8 @@ jobs:
           if [[ "$TS_IP" != 100.* ]]; then
             echo "===== tailscaled LOG ====="
             cat /tmp/tailscaled.log || true
-            echo "===== tailscale up LOG ====="
+            echo "===== tsup LOG ====="
             cat /tmp/tsup.log || true
-            echo "Check: https://login.tailscale.com/admin/machines"
             TS_IP="check-tailscale-dashboard"
           fi
 
@@ -216,18 +250,27 @@ jobs:
           echo "  PASSWORD     : your VNC_PASSWORD secret"
           echo "========================================"
           echo "  VNC - RealVNC Viewer:"
-          echo "  Address: $TS_IP"
-          echo "  Password: your VNC_PASSWORD"
+          echo "  Address  : $TS_IP"
+          echo "  Password : your VNC_PASSWORD secret"
           echo "========================================"
-          echo "  SSH - Terminal/PuTTY:"
+          echo "  VNC - TigerVNC (if RealVNC fails):"
+          echo "  Address  : $TS_IP:5900"
+          echo "  Password : your VNC_PASSWORD secret"
+          echo "========================================"
+          echo "  SSH:"
           echo "  ssh runner@$TS_IP"
+          echo "========================================"
+          echo "  IMPORTANT - RealVNC Viewer settings:"
+          echo "  Options -> Security -> set to VNC password"
+          echo "  NOT to username+password"
           echo "========================================"
           echo "  STEPS FROM WINDOWS:"
           echo "  1. Install Tailscale -> tailscale.com/download"
           echo "  2. Login with SAME Tailscale account"
-          echo "  3. Install RealVNC Viewer"
-          echo "  4. Open RealVNC -> type: $TS_IP"
-          echo "  5. Password: your VNC_PASSWORD"
+          echo "  3. Open RealVNC Viewer"
+          echo "  4. Address: $TS_IP"
+          echo "  5. Options -> Security -> VNC password"
+          echo "  6. Password: your VNC_PASSWORD"
           echo "========================================"
           echo "  macOS  : $(sw_vers -productVersion)"
           echo "  Arch   : $(uname -m)"
