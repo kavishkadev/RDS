@@ -1,4 +1,4 @@
-name: Windows 11 RDP + Exit Node
+name: Windows 11
 
 on:
   workflow_dispatch:
